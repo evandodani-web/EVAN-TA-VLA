@@ -136,15 +136,33 @@ contact information from those two dims.
 
 ### Data transfer to RunPod — rsync over SSH (NOT Hugging Face)
 Sensitive IP → do **not** push to the Hub. Put data on a **persistent Network Volume**
-(`/workspace`) on the pod, then:
+(`/workspace`) on the pod. Three things must be transferred: the dataset, the norm stats for
+both configs, and the repo itself (or at least the `assets/` tree). Run from this machine:
+
 ```bash
+# 1. Dataset (~987 MB of AV1 video — omit -z, already compressed)
 rsync -avP -e "ssh -p <PORT>" \
   ~/.cache/huggingface/lerobot/trossen_bimanual_transfer_cube_tavla/ \
   root@<POD_HOST>:/workspace/hf/lerobot/trossen_bimanual_transfer_cube_tavla/
+
+# 2. Norm stats for both configs (small JSON files, fast)
+rsync -avP -e "ssh -p <PORT>" \
+  ~/EVAN-TA-VLA/assets/ \
+  root@<POD_HOST>:/workspace/EVAN-TA-VLA/assets/
+
+# 3. The repo (if not already cloned on the pod)
+rsync -avP --exclude='.venv' --exclude='__pycache__' -e "ssh -p <PORT>" \
+  ~/EVAN-TA-VLA/ \
+  root@<POD_HOST>:/workspace/EVAN-TA-VLA/
 ```
-(`-z` omitted: video is already AV1-compressed.) On the pod, set
-`export HF_LEROBOT_HOME=/workspace/hf/lerobot` (or symlink) so the loader finds it, and use
-`local_files_only=True` in the data config.
+
+On the pod, before training:
+```bash
+export HF_LEROBOT_HOME=/workspace/hf/lerobot   # so the data loader finds the dataset
+cd /workspace/EVAN-TA-VLA
+uv sync                                          # installs .venv with lerobot 0.1.0 + JAX
+```
+(`local_files_only=True` is already set in both our configs so no Hub access is attempted.)
 
 ### Phase 2 — Training config (SOTA variant) ✅ COMPLETE (Jul 13 2026)
 Two `TrainConfig`s were added to `src/openpi/training/config.py` (right after the
@@ -204,9 +222,26 @@ Two `TrainConfig`s were added to `src/openpi/training/config.py` (right after th
 - One-time setup done: the PaliGemma tokenizer is fetched by `config.data.create(...)` (cached in
   `~/.cache/openpi`); it is *not* used in the norm-stats pass itself but is constructed eagerly.
 
-**Remaining before training (user runs on the pod):**
-- `python scripts/train.py --config-name=pi0_trossen_transfer_effort_sota --exp-name=<run>`
-  (`--wandb_enabled` optional). `exp_name` is required. Ablation: swap the config name.
+**Training commands (run on the pod after rsync — see transfer section above):**
+```bash
+cd /workspace/EVAN-TA-VLA
+
+# SOTA run (paper "+obs+obj", EXPERT_HIS_C_FUT)
+.venv/bin/python scripts/train.py \
+  --config-name=pi0_trossen_transfer_effort_sota \
+  --exp-name=run_001 \
+  --wandb_enabled=True     # optional; remove if not using W&B
+
+# Ablation run (pure-obs DePost, EXPERT) — swap config name only
+.venv/bin/python scripts/train.py \
+  --config-name=pi0_trossen_transfer_effort_expert \
+  --exp-name=run_001 \
+  --wandb_enabled=True
+```
+`--exp-name` is required (names the checkpoint subdirectory under `checkpoints/<config_name>/`).
+Checkpoints are saved every 1000 steps; best-of-N kept at multiples of 5000 (`keep_period`).
+`num_train_steps=30_000` for both configs (matches the existing effort config templates).
+To resume an interrupted run add `--resume=True` (incompatible with `--overwrite=True`).
 
 ### Phase 3 — Deployment on Trossen
 - Run `scripts/serve_policy.py` with the trained checkpoint (websocket server).
