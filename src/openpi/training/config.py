@@ -869,6 +869,68 @@ _CONFIGS = [
         ).get_freeze_filter(),
         ema_decay=None,
     ),
+    #
+    # Trossen bimanual "hand over the Rubik's cube" — torque-aware pi0 (TA-VLA).
+    # Data: v3.0 -> v2.x npz bridge output at
+    #   ~/.cache/huggingface/lerobot/trossen_bimanual_transfer_cube_tavla
+    #   observation.state(14) + observation.effort(14) + action(14) + 3 cameras, fps=30.
+    #
+    # SOTA variant from the TA-VLA paper: "+obs+obj" (EXPERT_HIS_C_FUT).
+    #   - History effort (10 frames spanning -36..0 @ 30 fps, ~1.2 s) is concatenated and
+    #     projected into a single token fed to the action expert (obs).
+    #   - Future effort over the action horizon (auto-appended by the data loader) is predicted
+    #     alongside actions; compute_loss uses action_loss + 0.1 * effort_loss (obj).
+    #   - effort_dim_in is auto-set to effort_dim * len(effort_history) = 14 * 10 = 140 by
+    #     TrainConfig.__post_init__; action_in/out_proj widen to action_dim + effort_dim = 46.
+    TrainConfig(
+        name="pi0_trossen_transfer_effort_sota",
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_C_FUT,
+            effort_dim=14,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="trossen_bimanual_transfer_cube_tavla",
+            effort_history=tuple(4 * i - 36 for i in range(10)),  # 10 frames over ~1.2 s @ 30 fps
+            default_prompt="Grab and hand over the Rubik's cube to the other arm",
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    # Ablation baseline: pure-obs "DePost" (EXPERT) on the same data — current effort only,
+    # no history, no future-torque objective. One enum change vs. the SOTA config so the two
+    # are directly comparable. effort_dim_in is auto-set to effort_dim = 14.
+    TrainConfig(
+        name="pi0_trossen_transfer_effort_expert",
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT,
+            effort_dim=14,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="trossen_bimanual_transfer_cube_tavla",
+            effort_history=(0,),  # current frame only
+            default_prompt="Grab and hand over the Rubik's cube to the other arm",
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
     # This config is used to demonstrate how to train on a simple simulated environment.
     TrainConfig(
         name="pi0_aloha_sim",

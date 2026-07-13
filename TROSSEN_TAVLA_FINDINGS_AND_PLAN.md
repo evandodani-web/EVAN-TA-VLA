@@ -146,19 +146,67 @@ rsync -avP -e "ssh -p <PORT>" \
 `export HF_LEROBOT_HOME=/workspace/hf/lerobot` (or symlink) so the loader finds it, and use
 `local_files_only=True` in the data config.
 
-### Phase 2 — Training config (SOTA variant)
-- Add a `TrainConfig` (e.g. `pi0_trossen_transfer_effort_sota`):
-  - `model = Pi0Config(effort_type=EffortType.EXPERT_HIS_C_FUT, effort_dim=14)`
-    (widens action proj to `32+14`; adds `action_loss + 0.1*effort_loss`).
-  - `data = LeRobotTavlaDataConfig(repo_id=<converted>,`
-    `effort_history=tuple(4*i-36 for i in range(10)),`  ← 10 frames over ~1.2 s @ 30 fps
-    `default_prompt="Grab and hand over the Rubik's cube to the other arm", ...)`.
-    The loader auto-appends the 50-step future for the objective;
-    `TrainConfig.__post_init__` sets `effort_dim_in = 14*10 = 140`.
-  - LoRA freeze filter + `CheckpointWeightLoader(pi0_base)` (as in existing effort configs).
-- `scripts/compute_norm_stats.py --config-name=…` (includes the `effort` key), then `scripts/train.py`.
-- Also register a plain `EXPERT` (DePost) config on the same data for a later ablation
-  (one enum change).
+### Phase 2 — Training config (SOTA variant) ✅ COMPLETE (Jul 13 2026)
+Two `TrainConfig`s were added to `src/openpi/training/config.py` (right after the
+`pi0_lora_effort_history` template), plus norm stats computed locally. Training itself is
+**not** run here — that is done by the user (on the H100 pod).
+
+**1. SOTA config — `pi0_trossen_transfer_effort_sota`** (paper "+obs+obj"):
+  - `model = Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora",`
+    `effort_type=EffortType.EXPERT_HIS_C_FUT, effort_dim=14)`.
+  - `data = LeRobotTavlaDataConfig(repo_id="trossen_bimanual_transfer_cube_tavla",`
+    `effort_history=tuple(4*i-36 for i in range(10)),`  ← offsets `(-36…0)` step 4 = 10 frames / ~1.2 s @ 30 fps
+    `default_prompt="Grab and hand over the Rubik's cube to the other arm",`
+    `base_config=DataConfig(local_files_only=True))`.
+  - `weight_loader=CheckpointWeightLoader(pi0_base)`, `num_train_steps=30_000`,
+    LoRA `freeze_filter`, `ema_decay=None` — identical to the existing effort configs.
+
+**2. Ablation config — `pi0_trossen_transfer_effort_expert`** (pure-obs "DePost"):
+  - Same as above but `effort_type=EffortType.EXPERT` and `effort_history=(0,)` (current effort
+    only, no history, no future objective). Directly comparable to the SOTA config — a single
+    enum + history change — for quantifying the lift from history+objective.
+
+**Why these settings (verified against the code, not assumed):**
+- `EXPERT_HIS_C_FUT` is the *only* enum value that gives the paper's SOTA "+obs+obj":
+  history torque → one concatenated token to the action expert **and** future torque predicted
+  alongside actions. The shipped `pi0_lora_effort*` configs use `EXPERT`/`EXPERT_HIS_C` (neither
+  is SOTA) and point at placeholder `repo_id="org/repo"` / `default_prompt="do something"`.
+- The future-torque objective is **fully automatic** given the enum (traced end-to-end):
+  - `data_loader.create_dataset` (lines 110–113) appends `+1…+action_horizon` future frames to
+    the `observation.effort` `delta_timestamps` when the type is a `*_FUT` variant → the column
+    comes back as `[len(effort_history)+action_horizon, 14] = [10+50, 14] = [60,14]`.
+  - `pi0.compute_loss` (lines 334–339) peels the last `action_horizon` frames off as the
+    future-effort *target* (concatenated onto actions) and keeps the first `len(effort_history)`
+    frames as the history *input*.
+  - `_process_effort_tokens` (EXPERT_HIS_C_FUT branch) flattens the `[10,14]` history → `[140]`,
+    matching `effort_dim_in`.
+  - `action_in_proj`/`action_out_proj` widen to `action_dim + effort_dim = 32+14 = 46`; loss is
+    `action_loss + 0.1*effort_loss`.
+- `TrainConfig.__post_init__` auto-sets `effort_dim_in = effort_dim * len(effort_history)`:
+  **140** for SOTA (`14*10`), **14** for the ablation (`14*1`). `effort_dim_in` is not a declared
+  `Pi0Config` field — it is injected here — so the model must be built via a `TrainConfig` (both
+  of ours are). Confirmed by construction test: SOTA → `effort_dim_in=140`, EXPERT → `14`.
+- `action_horizon` is kept at the default **50** (per decision): it silently controls how many
+  future effort frames are sampled/sliced. Do **not** put future offsets in `effort_history` — it
+  holds the 10 history offsets only; `future_steps` is taken from `actions.shape[1]`.
+- `default_prompt` set (not `None`) ⇒ `prompt_from_task=False` ⇒ the dataset's task string is
+  ignored and this exact prompt is injected at train time. It **must** byte-match the Phase 3
+  deploy prompt. (Note: this apostrophe form differs from the dataset's stored task string
+  `"…Rubiks cube…"`, which is now irrelevant since we override it.)
+
+**Norm stats (computed locally, Jul 13 2026):**
+- `scripts/compute_norm_stats.py --config-name=<config>` was run for **both** configs over all
+  **39,650 frames**. Output: `assets/<config_name>/trossen_bimanual_transfer_cube_tavla/norm_stats.json`.
+- Verified keys/shapes: `state (32)`, `actions (32)` (padded to `action_dim`), `effort (14)`.
+  The `effort` key is only computed because `effort_history` is set (see `compute_norm_stats.py`
+  lines 82–83). These assets must be **rsync'd to the pod alongside the dataset** (or recomputed
+  there) — norm stats are keyed by config name under `assets/`.
+- One-time setup done: the PaliGemma tokenizer is fetched by `config.data.create(...)` (cached in
+  `~/.cache/openpi`); it is *not* used in the norm-stats pass itself but is constructed eagerly.
+
+**Remaining before training (user runs on the pod):**
+- `python scripts/train.py --config-name=pi0_trossen_transfer_effort_sota --exp-name=<run>`
+  (`--wandb_enabled` optional). `exp_name` is required. Ablation: swap the config name.
 
 ### Phase 3 — Deployment on Trossen
 - Run `scripts/serve_policy.py` with the trained checkpoint (websocket server).
@@ -172,8 +220,11 @@ rsync -avP -e "ssh -p <PORT>" \
 
 ### Open items
 - ~~Conversion route~~ — done, npz bridge.
-- Phase 2: add `EXPERT_HIS_C_FUT` (SOTA) + `EXPERT` (ablation) train configs to `config.py`,
-  then run `compute_norm_stats` on the pod.
+- ~~Phase 2: add `EXPERT_HIS_C_FUT` (SOTA) + `EXPERT` (ablation) train configs to `config.py`~~
+  — done (`pi0_trossen_transfer_effort_sota`, `pi0_trossen_transfer_effort_expert`);
+  norm stats computed locally for both.
+- Transfer to pod: rsync the dataset **and** `assets/pi0_trossen_transfer_effort_sota/` +
+  `assets/pi0_trossen_transfer_effort_expert/` (norm stats), then `scripts/train.py`.
 - Phase 3: deploy — openpi websocket server + custom Trossen client (recommended).
 
 ---
