@@ -227,22 +227,23 @@ Two `TrainConfig`s were added to `src/openpi/training/config.py` (right after th
 ```bash
 cd /workspace/EVAN-TA-VLA
 
-# SOTA run (paper "+obs+obj", EXPERT_HIS_C_FUT)
-.venv/bin/python scripts/train.py \
-  --config-name=pi0_trossen_transfer_effort_sota \
-  --exp-name=run_001 \
-  --wandb_enabled=True     # optional; remove if not using W&B
+# train.py uses tyro's overridable_config_cli: config name is a POSITIONAL subcommand
+# (no --config-name=), and --wandb-enabled is a bare boolean flag (no =True).
 
-# Ablation run (pure-obs DePost, EXPERT) — swap config name only
-.venv/bin/python scripts/train.py \
-  --config-name=pi0_trossen_transfer_effort_expert \
-  --exp-name=run_001 \
-  --wandb_enabled=True
+# SOTA run (paper "+obs+obj", EXPERT_HIS_C_FUT)
+.venv/bin/python scripts/train.py pi0_trossen_transfer_effort_sota \
+  --exp-name run_001 \
+  --wandb-enabled          # optional; omit (or --no-wandb-enabled) if not using W&B
+
+# Ablation run (pure-obs DePost, EXPERT) — swap the positional config name only
+.venv/bin/python scripts/train.py pi0_trossen_transfer_effort_expert \
+  --exp-name run_001 \
+  --wandb-enabled
 ```
 `--exp-name` is required (names the checkpoint subdirectory under `checkpoints/<config_name>/`).
 Checkpoints are saved every 1000 steps; best-of-N kept at multiples of 5000 (`keep_period`).
 `num_train_steps=30_000` for both configs (matches the existing effort config templates).
-To resume an interrupted run add `--resume=True` (incompatible with `--overwrite=True`).
+To resume an interrupted run add `--resume` (bare flag; incompatible with `--overwrite`).
 
 ### Phase 3 — Deployment on Trossen
 - Run `scripts/serve_policy.py` with the trained checkpoint (websocket server).

@@ -23,7 +23,9 @@ Verified end-to-end on **Jul 13 2026**: RunPod **H100 80GB HBM3**, `/workspace` 
 | Pod `LEROBOT_HOME` (+ `HF_LEROBOT_HOME`) | `/workspace/hf/lerobot` |
 
 RunPod also exposes extra TCP ports (e.g. `:22146`, `:2022`); only the SSH port `22145`
-matters for Cursor Remote-SSH and rsync. `:2022` is typically for Eternal Terminal (optional).
+matters for Cursor Remote-SSH and rsync. `:22146` is RunPod's HTTP proxy for internal port
+`:2022` (Eternal Terminal) — but RunPod's proxy is HTTP-only, so raw TCP (ET) is blocked
+externally. Use an SSH tunnel instead (see §1e).
 
 ---
 
@@ -67,6 +69,27 @@ should appear in the pod's `ssh-keygen -lf ~/.ssh/authorized_keys`.
 ### 1d. Connect Cursor (optional IDE access)
 `Ctrl+Shift+P` → **Remote-SSH: Connect to Host…** → `runpod-tavla` → platform **Linux** →
 **File → Open Folder** → `/workspace/EVAN-TA-VLA`.
+
+### 1e. Eternal Terminal (optional — reconnectable shell)
+ET lets you reconnect to a running shell after a network drop without re-running `tmux attach`.
+RunPod's port 22146 is an HTTP proxy (not raw TCP), so ET must tunnel through SSH.
+
+**On the pod** (once per pod lifetime, after SSH-ing in):
+```bash
+etserver --daemon   # listens on port 2022 (default); do NOT use --port 22146
+```
+
+**From your Mac** (two steps each session):
+```bash
+# 1. Open the SSH tunnel in the background
+ssh -fNL 2022:localhost:2022 root@63.141.33.87 -p 22145 -i ~/.ssh/id_ed25519
+
+# 2. Connect ET through it
+et root@localhost:2022
+```
+
+> Note: `tmux` (§5) already handles disconnects for training jobs and is simpler.
+> ET is only worth the tunnel overhead if you want seamless shell reconnection.
 
 ---
 
@@ -179,27 +202,29 @@ cd /workspace/EVAN-TA-VLA
 export LEROBOT_HOME=/workspace/hf/lerobot HF_LEROBOT_HOME=/workspace/hf/lerobot
 
 # SOTA variant — paper "+obs+obj" (EXPERT_HIS_C_FUT)
-.venv/bin/python scripts/train.py \
-  --config-name=pi0_trossen_transfer_effort_sota \
-  --exp-name=run_001
-# add --wandb_enabled=True to log to Weights & Biases.
+# NOTE: train.py uses tyro's overridable_config_cli — the config name is a POSITIONAL
+# subcommand (no --config-name=), and --wandb-enabled is a bare boolean flag (no =True).
+.venv/bin/python scripts/train.py pi0_trossen_transfer_effort_sota \
+  --exp-name run_001 \
+  --wandb-enabled
 # For W&B: do NOT use `wandb login` (the interactive prompt rejects new-format
 # `wandb_v1_...` keys). Instead set the key as an env var:
 #   echo 'export WANDB_API_KEY=<your wandb_v1_ key>' >> ~/.bashrc && source ~/.bashrc
+# Omit --wandb-enabled (or pass --no-wandb-enabled) to disable W&B.
 ```
 
 Ablation baseline (pure-obs DePost, `EXPERT`) — same command, different config:
 ```bash
-.venv/bin/python scripts/train.py \
-  --config-name=pi0_trossen_transfer_effort_expert \
-  --exp-name=run_001
+.venv/bin/python scripts/train.py pi0_trossen_transfer_effort_expert \
+  --exp-name run_001 \
+  --wandb-enabled
 ```
 
 Notes:
 - `--exp-name` is **required**; names the checkpoint dir
   `checkpoints/<config_name>/<exp_name>/`.
 - `num_train_steps=30_000`; checkpoints every 1,000 steps, kept at multiples of 5,000.
-- Resume an interrupted run: add `--resume=True` (mutually exclusive with `--overwrite=True`).
+- Resume an interrupted run: add `--resume` (bare boolean flag; mutually exclusive with `--overwrite`).
 - Sanity-check the first ~50 steps: loss should print and trend down before you detach.
 
 ---
