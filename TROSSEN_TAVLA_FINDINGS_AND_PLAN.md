@@ -158,7 +158,8 @@ rsync -avP --exclude='.venv' --exclude='__pycache__' -e "ssh -p <PORT>" \
 
 On the pod, before training:
 ```bash
-export HF_LEROBOT_HOME=/workspace/hf/lerobot   # so the data loader finds the dataset
+export LEROBOT_HOME=/workspace/hf/lerobot        # pinned lerobot 0.1.0 reads LEROBOT_HOME (NOT HF_LEROBOT_HOME)
+export HF_LEROBOT_HOME=/workspace/hf/lerobot     # harmless; used by 0.5.2 tooling
 cd /workspace/EVAN-TA-VLA
 uv sync                                          # installs .venv with lerobot 0.1.0 + JAX
 ```

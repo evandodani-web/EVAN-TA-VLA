@@ -54,4 +54,5 @@ rsync -avP -e "ssh -p <PORT>" \
   root@<POD_HOST>:/workspace/hf/lerobot/trossen_bimanual_transfer_cube_tavla/
 ```
 
-On the pod: `export HF_LEROBOT_HOME=/workspace/hf/lerobot` and use `local_files_only=True`.
+On the pod: `export LEROBOT_HOME=/workspace/hf/lerobot` (openpi's pinned lerobot 0.1.0 reads
+`LEROBOT_HOME`, not `HF_LEROBOT_HOME`) and use `local_files_only=True`.

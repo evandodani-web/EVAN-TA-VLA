@@ -20,7 +20,7 @@ Verified end-to-end on **Jul 13 2026**: RunPod **H100 80GB HBM3**, `/workspace` 
 | Local repo | `~/EVAN-TA-VLA` |
 | Pod dataset dir | `/workspace/hf/lerobot/trossen_bimanual_transfer_cube_tavla` |
 | Pod repo dir | `/workspace/EVAN-TA-VLA` |
-| Pod `HF_LEROBOT_HOME` | `/workspace/hf/lerobot` |
+| Pod `LEROBOT_HOME` (+ `HF_LEROBOT_HOME`) | `/workspace/hf/lerobot` |
 
 RunPod also exposes extra TCP ports (e.g. `:22146`, `:2022`); only the SSH port `22145`
 matters for Cursor Remote-SSH and rsync. `:2022` is typically for Eternal Terminal (optional).
@@ -107,7 +107,11 @@ Expect `data  meta  videos` and the two `pi0_trossen_transfer_effort_*` dirs.
 ## 3. Environment setup (run ON the pod)
 ```bash
 cd /workspace/EVAN-TA-VLA
-echo 'export HF_LEROBOT_HOME=/workspace/hf/lerobot' >> ~/.bashrc && source ~/.bashrc
+# IMPORTANT: openpi's pinned lerobot 0.1.0 reads LEROBOT_HOME (NOT HF_LEROBOT_HOME).
+# Set both so the data loader (0.1.0) and any 0.5.2 tooling both resolve the dataset.
+echo 'export HF_LEROBOT_HOME=/workspace/hf/lerobot' >> ~/.bashrc
+echo 'export LEROBOT_HOME=/workspace/hf/lerobot'    >> ~/.bashrc
+source ~/.bashrc
 uv sync                                   # builds .venv (lerobot 0.1.0 + JAX)
 ```
 
@@ -123,7 +127,7 @@ Verify JAX sees the GPU (must print a `CudaDevice`, not `CpuDevice`):
 
 ### 4a. Config + norm stats resolve
 ```bash
-export HF_LEROBOT_HOME=/workspace/hf/lerobot
+export LEROBOT_HOME=/workspace/hf/lerobot HF_LEROBOT_HOME=/workspace/hf/lerobot
 .venv/bin/python -c "
 import openpi.training.config as C
 cfg = C.get_config('pi0_trossen_transfer_effort_sota')
@@ -135,12 +139,32 @@ print('norm_stats keys =', None if dc.norm_stats is None else list(dc.norm_stats
 Expect `effort_dim_in = 140` and `norm_stats keys = ['state', 'actions', 'effort']`.
 If `norm_stats keys` is `None`, the assets didn't transfer — recompute (§4b).
 
+> Note: this check reads norm stats from `assets/` only — it does **not** load the dataset,
+> so it will pass even if `LEROBOT_HOME` is wrong. Use §4c to actually exercise the data loader.
+
 ### 4b. (Only if norm stats are missing) recompute on the pod
 ```bash
-export HF_LEROBOT_HOME=/workspace/hf/lerobot
+export LEROBOT_HOME=/workspace/hf/lerobot HF_LEROBOT_HOME=/workspace/hf/lerobot
 .venv/bin/python scripts/compute_norm_stats.py --config-name=pi0_trossen_transfer_effort_sota
 .venv/bin/python scripts/compute_norm_stats.py --config-name=pi0_trossen_transfer_effort_expert
 ```
+
+### 4c. Data-loader smoke test (catches a wrong `LEROBOT_HOME`)
+```bash
+export LEROBOT_HOME=/workspace/hf/lerobot HF_LEROBOT_HOME=/workspace/hf/lerobot
+.venv/bin/python -c "
+import dataclasses, numpy as np
+import openpi.training.config as C
+from openpi.training import data_loader as DL
+cfg = dataclasses.replace(C.get_config('pi0_trossen_transfer_effort_sota'), batch_size=2)
+loader = DL.create_data_loader(cfg, shuffle=True, num_batches=1, num_workers=0)
+obs, actions = next(iter(loader))
+print('effort:', tuple(np.asarray(obs.effort).shape))   # (2, 60, 14) = 10 history + 50 future
+print('state:', tuple(np.asarray(obs.state).shape), 'actions:', tuple(np.asarray(actions).shape))
+"
+```
+Expect `effort: (2, 60, 14)`, `state: (2, 32)`, `actions: (2, 50, 32)`. A `FileNotFoundError`
+for `meta/info.json` under `~/.cache/huggingface/lerobot/...` means `LEROBOT_HOME` isn't set.
 
 ---
 
@@ -152,13 +176,16 @@ The first run downloads `pi0_base` weights from the public `s3://openpi-assets` 
 ```bash
 tmux new -s train                         # detach: Ctrl-b d | reattach: tmux attach -t train
 cd /workspace/EVAN-TA-VLA
-export HF_LEROBOT_HOME=/workspace/hf/lerobot
+export LEROBOT_HOME=/workspace/hf/lerobot HF_LEROBOT_HOME=/workspace/hf/lerobot
 
 # SOTA variant — paper "+obs+obj" (EXPERT_HIS_C_FUT)
 .venv/bin/python scripts/train.py \
   --config-name=pi0_trossen_transfer_effort_sota \
   --exp-name=run_001
-# add --wandb_enabled=True to log to Weights & Biases (run `wandb login` first)
+# add --wandb_enabled=True to log to Weights & Biases.
+# For W&B: do NOT use `wandb login` (the interactive prompt rejects new-format
+# `wandb_v1_...` keys). Instead set the key as an env var:
+#   echo 'export WANDB_API_KEY=<your wandb_v1_ key>' >> ~/.bashrc && source ~/.bashrc
 ```
 
 Ablation baseline (pure-obs DePost, `EXPERT`) — same command, different config:
@@ -200,6 +227,8 @@ Both: `repo_id="trossen_bimanual_transfer_cube_tavla"`, `local_files_only=True`,
 | rsync `chown ... Operation not permitted` + `code 23` | Harmless on the `/workspace` network FS — use `--no-owner --no-group --no-perms`. |
 | `jax.devices()` shows `CpuDevice` | GPU not visible to JAX — check the pod actually has a GPU / correct JAX build in `.venv`. |
 | `norm_stats keys = None` at train start | Norm-stat assets not present under `assets/<config>/` — transfer them or recompute (§4b). |
+| `FileNotFoundError: .../meta/info.json` under `~/.cache/huggingface/lerobot` | `LEROBOT_HOME` not set. openpi's lerobot 0.1.0 reads `LEROBOT_HOME` (not `HF_LEROBOT_HOME`); `export LEROBOT_HOME=/workspace/hf/lerobot`. |
+| `wandb: ERROR API key must be 40 characters long` | New-format `wandb_v1_...` key pasted into interactive `wandb login`. Use `export WANDB_API_KEY=...` instead. |
 | Training dies on SSH disconnect | Run inside `tmux` (§5). |
 
 ---
