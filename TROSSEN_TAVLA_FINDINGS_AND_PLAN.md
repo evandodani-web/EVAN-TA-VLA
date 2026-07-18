@@ -245,15 +245,74 @@ Checkpoints are saved every 1000 steps; best-of-N kept at multiples of 5000 (`ke
 `num_train_steps=30_000` for both configs (matches the existing effort config templates).
 To resume an interrupted run add `--resume` (bare flag; incompatible with `--overwrite`).
 
-### Phase 3 — Deployment on Trossen
-- Run `scripts/serve_policy.py` with the trained checkpoint (websocket server).
-- Write a Trossen client (structure from `symbiotic/rl/deploy.py` + `examples/aloha_real`):
-  - `bi_widowxai_follower_robot` with `include_external_effort=True` + 3 cameras;
-  - maintain a **10-frame effort history buffer at the training offsets** (`-36…0` step 4);
-  - assemble the `TavlaInputs` obs (`state`(14), `effort`(10,14), 3 images,
-    prompt = exact training task string); query server → 14-dim action chunk;
-  - stream to arms with **EMA + `max_relative_target` + fps pacing** for safety.
-- Evaluate the handover contact moment vs a position-only baseline to quantify the lift.
+### Phase 3 — Deployment on Trossen ✅ CLIENT IMPLEMENTED (Jul 18 2026)
+Two-process deploy on this machine (it has the GPU **and** the arms), talking over
+`ws://localhost:8000`:
+- **Process A — model server** (`~/EVAN-TA-VLA/.venv`, JAX): `scripts/serve_policy.py` hosting the
+  trained checkpoint. lerobot's PyTorch policy server can't load an orbax checkpoint, so openpi's
+  own websocket server is used.
+- **Process B — robot client** (`~/lerobot_trossen/.venv`, py3.12 + `openpi-client`): the new
+  `examples/trossen_real/` package. Imports only `openpi_client` + `lerobot`/`lerobot_robot_trossen`
+  (not the JAX `openpi`).
+
+**Files created (`examples/trossen_real/`):**
+- `env.py` — `TrossenRealEnvironment(openpi_client.runtime.Environment)`. Builds
+  `BiWidowXAIFollowerRobotConfig` (IPs from `$FOLLOWER_{LEFT,RIGHT}_IP_ADDR`, 3 RealSense cams from
+  `$CAM_{HIGH,LEFT_WRIST,RIGHT_WRIST}_SN`, `include_external_effort=True`,
+  `max_relative_target=1.0`), connects, and:
+  - maintains a `deque(maxlen=37)` of `ext_eff`, sampling offsets `(-36…0)` step 4 into
+    `effort[10,14]` (oldest→newest) each tick;
+  - assembles `state[14]` + `effort[10,14]` + 3 raw HWC uint8 images + prompt;
+  - maps returned `actions[…,14]` back onto the follower `.pos` keys (`send_action`), with optional
+    action-space EMA and a `--dry-run` gate.
+  - **Start pose:** stages both arms to the data-collection **perch pose**
+    `PERCH_STAGED_POSITIONS = [0, π/3, π/6, π/5, 0, 0, 0]` (not the follower's all-zeros default) so
+    each episode begins in-distribution.
+- `main.py` — `WebsocketClientPolicy → ActionChunkBroker(25) → PolicyAgent → Runtime(max_hz=30)`;
+  tyro `Args` (note: tyro uses **hyphenated** flags: `--action-horizon`, `--dry-run`, …).
+- `README.md` — the two-process runbook (contract table, safety ladder, flag reference).
+
+**Key deploy facts (verified against code):**
+- Client sends obs already in `TavlaInputs` form (server does **not** repack via
+  `create_trained_policy`). Server returns `actions[50,14]` already **absolute** (un-deltas with the
+  sent `state`, strips predicted future effort). Delta/normalization are entirely server-side; the
+  client sends raw physical `state` (rad/m) and `effort` (Nm/N) and raw HWC uint8 images (server
+  resizes→224 via `ResizeImages`).
+- State/effort ordering matches the training split exactly (`export_v30_to_npz.py`): state =
+  `[L joint_0..5, L carriage, R joint_0..5, R carriage]`, effort = same order `.ext_eff`. Verified
+  by importing the module (`STATE_KEYS`/`EFFORT_KEYS`, gripper dims at indices 6/13).
+- **`action_horizon=25` is a deploy knob, not the trained 50.** The model always predicts a 50-step
+  chunk; the broker executes 25, then re-infers with fresh effort/images. Safe because actions are
+  absolute (no drift from skipping the tail) and it keeps the torque signal fresh mid-handover.
+- Effort-buffer indexing validated by simulation: newest frame = offset 0, oldest = offset −36,
+  shape `(10,14)`.
+
+**Checkpoint status (verified Jul 18 2026):** the trained SOTA checkpoint is present locally at
+`checkpoints/pi0_trossen_transfer_effort_sota/run_001/29999` — **5.8 GB**, intact orbax OCDBT
+(bulk weights in `params/ocdbt.process_0/d/`: ~2641 + 1804 + 1242 + 193 MB), valid
+`_METADATA`/`_sharding`, embedded `assets/norm_stats.json` (`state(32)`, `actions(32)`,
+`effort(14)`). Not truncated by rsync.
+
+**One-time client install (done):**
+`uv pip install --python ~/lerobot_trossen/.venv/bin/python -e ~/EVAN-TA-VLA/packages/openpi-client tyro`
+(pulls `openpi-client`, `tyro`, `websockets`, `msgpack`, `dm-tree`, `tree`).
+
+**Run (from `~/EVAN-TA-VLA`):**
+```bash
+# Process A — server (JAX venv)
+.venv/bin/python scripts/serve_policy.py --port 8000 \
+  policy:checkpoint --policy.config pi0_trossen_transfer_effort_sota \
+  --policy.dir checkpoints/pi0_trossen_transfer_effort_sota/run_001/29999
+
+# Process B — client (lerobot venv); drop --dry-run to command the arms
+~/lerobot_trossen/.venv/bin/python -m examples.trossen_real.main \
+  --host localhost --port 8000 --action-horizon 25 --dry-run
+```
+
+**Remaining (runtime, needs hardware):** the safety ladder — (1) server smoke, (2) `--dry-run`
+obs/action sanity, (3) guarded live (low `--max-episode-steps`, E-stop, `max_relative_target`
+clamp, optional `--action-ema-alpha`). Then evaluate the handover contact moment vs the
+position-only / `EXPERT` ablation to quantify the lift.
 
 ### Open items
 - ~~Conversion route~~ — done, npz bridge.
@@ -262,7 +321,10 @@ To resume an interrupted run add `--resume` (bare flag; incompatible with `--ove
   norm stats computed locally for both.
 - Transfer to pod: rsync the dataset **and** `assets/pi0_trossen_transfer_effort_sota/` +
   `assets/pi0_trossen_transfer_effort_expert/` (norm stats), then `scripts/train.py`.
-- Phase 3: deploy — openpi websocket server + custom Trossen client (recommended).
+- ~~Phase 3: deploy — openpi websocket server + custom Trossen client~~ — client **implemented**
+  (`examples/trossen_real/{env,main}.py` + `README.md`), `openpi-client` installed into the
+  lerobot venv, trained checkpoint verified present (5.8 GB). Remaining: the on-hardware safety
+  ladder (dry-run → guarded live) and the ablation comparison.
 
 ---
 

@@ -258,8 +258,34 @@ Both: `repo_id="trossen_bimanual_transfer_cube_tavla"`, `local_files_only=True`,
 
 ---
 
-## 8. Next: deployment (Phase 3, later)
-After a checkpoint exists: serve it with openpi's websocket policy server
-(`scripts/serve_policy.py`) and write a Trossen client (10-frame effort history buffer at the
-training offsets, EMA + `max_relative_target` + fps pacing). See Phase 3 in
-`TROSSEN_TAVLA_FINDINGS_AND_PLAN.md`.
+## 8. Next: deployment (Phase 3) — client implemented
+The deploy client now exists: **`examples/trossen_real/`** (`env.py`, `main.py`, `README.md`).
+After training, rsync the checkpoint back from the pod to this machine (which has the GPU **and**
+the arms), then run the two-process deploy:
+
+```bash
+# From the LOCAL machine: pull the trained checkpoint back from the pod (~5.8 GB)
+rsync -rltvP --mkpath --no-owner --no-group --no-perms -e "ssh -p 22145 -i ~/.ssh/id_ed25519" \
+  root@63.141.33.87:/workspace/EVAN-TA-VLA/checkpoints/pi0_trossen_transfer_effort_sota/run_001/29999/ \
+  ~/EVAN-TA-VLA/checkpoints/pi0_trossen_transfer_effort_sota/run_001/29999/
+```
+
+```bash
+# One-time: install the client deps into the lerobot venv
+uv pip install --python ~/lerobot_trossen/.venv/bin/python -e ~/EVAN-TA-VLA/packages/openpi-client tyro
+
+# Process A — model server (JAX venv)
+cd ~/EVAN-TA-VLA && .venv/bin/python scripts/serve_policy.py --port 8000 \
+  policy:checkpoint --policy.config pi0_trossen_transfer_effort_sota \
+  --policy.dir checkpoints/pi0_trossen_transfer_effort_sota/run_001/29999
+
+# Process B — robot client (lerobot venv); drop --dry-run to move the arms
+cd ~/EVAN-TA-VLA && ~/lerobot_trossen/.venv/bin/python -m examples.trossen_real.main \
+  --host localhost --port 8000 --action-horizon 25 --dry-run
+```
+
+The client maintains the 10-frame effort-history buffer at the training offsets, stages the arms
+to the data-collection perch pose, and enforces the follower `max_relative_target` clamp (plus
+optional `--action-ema-alpha`). Full contract, `action_horizon` rationale, and the safety ladder
+are in `examples/trossen_real/README.md` and Phase 3 of `TROSSEN_TAVLA_FINDINGS_AND_PLAN.md`.
+Checkpoint verified present locally (5.8 GB, intact orbax OCDBT) on Jul 18 2026.
