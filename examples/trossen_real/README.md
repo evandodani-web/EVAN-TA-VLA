@@ -93,16 +93,58 @@ cd ~/EVAN-TA-VLA && ~/lerobot_trossen/.venv/bin/python -m examples.trossen_real.
 Note: connecting drives both arms to their staged "perch" pose and opens the cameras — even in
 `--dry-run`. `--dry-run` only suppresses the *policy* actions (arms won't follow the model).
 
-## Safety & validation (run in this order)
-1. **Server smoke:** start Process A, then Process B with `--dry-run` — the client should print
-   the server metadata on connect.
-2. **Dry run:** with `--dry-run`, confirm assembled obs and returned actions look sane (no NaNs,
-   joint ranges reasonable). Arms do not follow the policy.
-3. **Guarded live:** drop `--dry-run` with a low `--max-episode-steps`, a hand on the E-stop, and
-   the follower `--max-relative-target` clamp active (default `1.0`). Optionally smooth with
-   `--action-ema-alpha 0.5`.
-4. **Ablation compare (later):** re-serve with `pi0_trossen_transfer_effort_expert` and compare
-   the handover contact behaviour.
+## Evaluation walkthrough (run in this order)
+
+### Pre-flight readiness (software) — verified Jul 20 2026
+| Check | Command | Expected |
+|---|---|---|
+| JAX sees the GPU | `.venv/bin/python -c "import jax; print(jax.devices())"` | `[CudaDevice(id=0)]` (RTX 5090, ~22 GB free) |
+| No competing GPU load | `nvidia-smi` | enough free VRAM for the 5.8 GB checkpoint |
+| Checkpoint present | `du -sh checkpoints/pi0_trossen_transfer_effort_sota/run_001/29999` | `5.8G` |
+| Client stack imports | `~/lerobot_trossen/.venv/bin/python -c "import openpi_client, tyro, trossen_arm, pyrealsense2, lerobot_robot_trossen; import examples.trossen_real.main"` | no error |
+| Hardware env vars set | `echo $FOLLOWER_LEFT_IP_ADDR $FOLLOWER_RIGHT_IP_ADDR $CAM_HIGH_SN $CAM_LEFT_WRIST_SN $CAM_RIGHT_WRIST_SN` | IPs + 3 serials |
+
+> Run the JAX check **outside** any sandbox — a sandbox that blocks device access falsely reports
+> `CpuDevice`, and serving on CPU would be unusably slow.
+
+### Pre-flight (physical / safety) — before starting the client
+1. Power on both follower arms; confirm reachable: `ping 192.168.1.5`, `ping 192.168.1.4`.
+2. Plug in the 3 RealSense cameras (high, left wrist, right wrist).
+3. **Clear the workspace and keep a hand on the E-stop** — the client drives both arms to the
+   perch pose **on connect, even in `--dry-run`**.
+4. Place the Rubik's cube at the same start location used during data collection.
+
+### 1. Server smoke
+Start Process A (server), then Process B with `--dry-run` — the client should log
+`Server metadata: {...}` on connect.
+
+### 2. Dry run (arms perch, but do NOT follow the policy)
+```bash
+cd ~/EVAN-TA-VLA && ~/lerobot_trossen/.venv/bin/python -m examples.trossen_real.main \
+  --host localhost --port 8000 --action-horizon 25 --max-episode-steps 150 --dry-run
+```
+Confirm: both arms move to the perch pose, cameras open, and repeated
+`[dry-run] action (not sent): [ …14 numbers… ]` look sane — no `nan`, arm joints ~±3 rad, gripper
+dims (indices **6** and **13**) in a sane meters range. Arms stay still. `Ctrl-C` to stop.
+
+### 3. Guarded live (arms follow the policy)
+Drop `--dry-run`; start short and slow with the E-stop ready:
+```bash
+cd ~/EVAN-TA-VLA && ~/lerobot_trossen/.venv/bin/python -m examples.trossen_real.main \
+  --host localhost --port 8000 --action-horizon 25 \
+  --max-episode-steps 150 --max-relative-target 1.0 --action-ema-alpha 0.5
+```
+- `--max-episode-steps 150` ≈ 5 s at 30 Hz for a first bounded attempt — raise toward `1000`
+  (~33 s) once it looks safe.
+- `--max-relative-target 1.0` keeps the follower's per-step joint clamp active (anti-lurch).
+- `--action-ema-alpha 0.5` smooths commanded targets; use `1.0` to disable once trusted.
+
+### 4. Stopping
+`Ctrl-C` the **client first** (arms park at staged → sleep pose), then `Ctrl-C` the server.
+
+### 5. Ablation compare (later)
+Re-serve with `pi0_trossen_transfer_effort_expert` and run the same client to quantify the
+torque-awareness lift at the handover contact moment.
 
 ## Key flags (`examples/trossen_real/main.py`)
 | flag | default | purpose |

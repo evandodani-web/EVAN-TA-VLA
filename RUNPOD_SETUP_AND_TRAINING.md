@@ -289,3 +289,78 @@ to the data-collection perch pose, and enforces the follower `max_relative_targe
 optional `--action-ema-alpha`). Full contract, `action_horizon` rationale, and the safety ladder
 are in `examples/trossen_real/README.md` and Phase 3 of `TROSSEN_TAVLA_FINDINGS_AND_PLAN.md`.
 Checkpoint verified present locally (5.8 GB, intact orbax OCDBT) on Jul 18 2026.
+
+---
+
+## 9. Evaluate the policy on the real Trossen arms — step by step
+
+This is the deploy on **this machine** (it has the GPU **and** the arms). Two processes in two
+terminals talk over `ws://localhost:8000`: Terminal 1 = JAX model server, Terminal 2 = robot
+client. Run everything from `~/EVAN-TA-VLA`.
+
+### 9a. Pre-flight readiness (software) — verified Jul 20 2026
+| Check | Command | Expected |
+|---|---|---|
+| JAX sees the GPU | `.venv/bin/python -c "import jax; print(jax.devices())"` | `[CudaDevice(id=0)]` (RTX 5090, ~22 GB free) |
+| No competing GPU load | `nvidia-smi` | enough free VRAM for the 5.8 GB checkpoint |
+| Checkpoint present | `du -sh checkpoints/pi0_trossen_transfer_effort_sota/run_001/29999` | `5.8G` |
+| Client stack imports | `~/lerobot_trossen/.venv/bin/python -c "import openpi_client, tyro, trossen_arm, pyrealsense2, lerobot_robot_trossen; import examples.trossen_real.main"` | no error |
+| Hardware env vars set | `echo $FOLLOWER_LEFT_IP_ADDR $FOLLOWER_RIGHT_IP_ADDR $CAM_HIGH_SN $CAM_LEFT_WRIST_SN $CAM_RIGHT_WRIST_SN` | `192.168.1.5 192.168.1.4 419122270126 412622272448 412622272396` |
+
+> The JAX check must be run **outside** any sandbox — a sandbox that blocks device access will
+> falsely report `CpuDevice`. Serving on CPU would be unusably slow.
+
+### 9b. Pre-flight (physical / safety) — do these before starting the client
+1. Power on both follower arms; confirm reachable: `ping 192.168.1.5` and `ping 192.168.1.4`.
+2. Plug in the 3 RealSense cameras (high, left wrist, right wrist).
+3. **Clear the workspace and keep a hand on the E-stop** — the client drives both arms to the
+   perch pose **on connect, even in `--dry-run`**.
+4. Place the Rubik's cube at the same start location used during data collection.
+
+### 9c. Terminal 1 — start the model server (JAX venv)
+```bash
+cd ~/EVAN-TA-VLA
+.venv/bin/python scripts/serve_policy.py --port 8000 \
+  policy:checkpoint --policy.config pi0_trossen_transfer_effort_sota \
+  --policy.dir checkpoints/pi0_trossen_transfer_effort_sota/run_001/29999
+```
+Wait for `Creating server (host: …)`. Loading is fully local (weights + PaliGemma tokenizer are
+already cached — no internet needed). Serves on `0.0.0.0:8000`.
+
+### 9d. Terminal 2 — dry run (arms perch, but do NOT follow the policy)
+```bash
+cd ~/EVAN-TA-VLA
+~/lerobot_trossen/.venv/bin/python -m examples.trossen_real.main \
+  --host localhost --port 8000 --action-horizon 25 \
+  --max-episode-steps 150 --dry-run
+```
+Success signals:
+- Client logs `Server metadata: {...}` (websocket connected).
+- Both arms move to the perch pose; cameras open.
+- Repeated `[dry-run] action (not sent): [ …14 numbers… ]` — eyeball them: no `nan`, arm joints
+  roughly in radians (~±3), gripper dims (indices **6** and **13**) in a sane meters range. Arms
+  stay still (policy actions are suppressed). `Ctrl-C` to stop.
+
+### 9e. Terminal 2 — guarded live run (arms follow the policy)
+Start short and slow; E-stop ready:
+```bash
+cd ~/EVAN-TA-VLA
+~/lerobot_trossen/.venv/bin/python -m examples.trossen_real.main \
+  --host localhost --port 8000 --action-horizon 25 \
+  --max-episode-steps 150 \
+  --max-relative-target 1.0 \
+  --action-ema-alpha 0.5
+```
+- `--max-episode-steps 150` ≈ 5 s at 30 Hz for a first bounded attempt — raise toward `1000`
+  (~33 s) once it looks safe.
+- `--max-relative-target 1.0` keeps the follower's per-step joint clamp active (anti-lurch).
+- `--action-ema-alpha 0.5` smooths commanded joint targets; use `1.0` to disable once trusted.
+
+### 9f. Stopping
+`Ctrl-C` the **client first** (arms park at staged → sleep pose), then `Ctrl-C` the server.
+
+### 9g. Optional / later
+- **Richer dry-run validation:** add a one-time first-step log of obs shapes (`state[14]`,
+  `effort[10,14]`, 3 image shapes) + explicit NaN/range checks in `env.py` to harden the gate.
+- **Ablation comparison:** re-serve with `pi0_trossen_transfer_effort_expert` (once that
+  checkpoint exists) and run the same client to quantify the torque-awareness lift.
