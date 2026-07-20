@@ -49,9 +49,9 @@ Raising it toward 50 executes more open-loop steps per inference (less compute, 
 lowering it re-infers more often. 25 is the recommended default; tune only if needed.
 
 ### Start pose (in-distribution)
-On connect, both arms move to the data-collection **"perch" pose**
-(`PERCH_STAGED_POSITIONS = [0, pi/3, pi/6, pi/5, 0, 0, 0]` in `env.py`), not the follower's
-all-zeros default, so each episode begins inside the training distribution.
+On connect, both arms move to the data-collection start pose
+(`STAGED_POSITIONS = [0, 0, 0, 0, 0, 0, 0]` in `env.py` — all-zeros, matching the pose the
+training dataset was recorded from), so each episode begins inside the training distribution.
 
 ## Prerequisites (one-time)
 Install the client deps into the lerobot venv (adds `openpi-client`, `tyro`, `websockets`,
@@ -75,6 +75,11 @@ cd ~/EVAN-TA-VLA && .venv/bin/python scripts/serve_policy.py --port 8000 \
   --policy.dir checkpoints/pi0_trossen_transfer_effort_sota/run_001/29999
 ```
 
+> **RTX 5090 (Blackwell) note:** serving locally requires a JAX/CUDA stack that targets sm_120.
+> The pinned `jax==0.5.0` (CUDA 12.6) fails with `ptxas too old` / `bf16→f16` errors. Fix (applied
+> Jul 20 2026): upgrade the CUDA-12 libs to 12.9 and bump `jax`/`jaxlib` to `0.5.3` — see §10 of
+> `RUNPOD_SETUP_AND_TRAINING.md`. Note `uv sync` reverts it.
+
 > **Checkpoint present & verified (Jul 18 2026):** the trained SOTA checkpoint was rsync'd back
 > from the pod to `checkpoints/pi0_trossen_transfer_effort_sota/run_001/29999` — **5.8 GB**, intact
 > orbax OCDBT (bulk weights in `params/ocdbt.process_0/d/`: ~2641 + 1804 + 1242 + 193 MB), valid
@@ -90,8 +95,8 @@ cd ~/EVAN-TA-VLA && ~/lerobot_trossen/.venv/bin/python -m examples.trossen_real.
   --host localhost --port 8000 --action-horizon 25 --dry-run   # drop --dry-run to move arms
 ```
 
-Note: connecting drives both arms to their staged "perch" pose and opens the cameras — even in
-`--dry-run`. `--dry-run` only suppresses the *policy* actions (arms won't follow the model).
+Note: connecting drives both arms to their staged start pose (all-zeros) and opens the cameras —
+even in `--dry-run`. `--dry-run` only suppresses the *policy* actions (arms won't follow the model).
 
 ## Evaluation walkthrough (run in this order)
 
@@ -111,19 +116,19 @@ Note: connecting drives both arms to their staged "perch" pose and opens the cam
 1. Power on both follower arms; confirm reachable: `ping 192.168.1.5`, `ping 192.168.1.4`.
 2. Plug in the 3 RealSense cameras (high, left wrist, right wrist).
 3. **Clear the workspace and keep a hand on the E-stop** — the client drives both arms to the
-   perch pose **on connect, even in `--dry-run`**.
+   staged start pose (all-zeros) **on connect, even in `--dry-run`**.
 4. Place the Rubik's cube at the same start location used during data collection.
 
 ### 1. Server smoke
 Start Process A (server), then Process B with `--dry-run` — the client should log
 `Server metadata: {...}` on connect.
 
-### 2. Dry run (arms perch, but do NOT follow the policy)
+### 2. Dry run (arms stage to start pose, but do NOT follow the policy)
 ```bash
 cd ~/EVAN-TA-VLA && ~/lerobot_trossen/.venv/bin/python -m examples.trossen_real.main \
   --host localhost --port 8000 --action-horizon 25 --max-episode-steps 150 --dry-run
 ```
-Confirm: both arms move to the perch pose, cameras open, and repeated
+Confirm: both arms move to the start pose (all-zeros), cameras open, and repeated
 `[dry-run] action (not sent): [ …14 numbers… ]` look sane — no `nan`, arm joints ~±3 rad, gripper
 dims (indices **6** and **13**) in a sane meters range. Arms stay still. `Ctrl-C` to stop.
 

@@ -265,9 +265,9 @@ Two-process deploy on this machine (it has the GPU **and** the arms), talking ov
   - assembles `state[14]` + `effort[10,14]` + 3 raw HWC uint8 images + prompt;
   - maps returned `actions[…,14]` back onto the follower `.pos` keys (`send_action`), with optional
     action-space EMA and a `--dry-run` gate.
-  - **Start pose:** stages both arms to the data-collection **perch pose**
-    `PERCH_STAGED_POSITIONS = [0, π/3, π/6, π/5, 0, 0, 0]` (not the follower's all-zeros default) so
-    each episode begins in-distribution.
+  - **Start pose:** stages both arms to the data-collection start pose
+    `STAGED_POSITIONS = [0, 0, 0, 0, 0, 0, 0]` (all-zeros, matching how the training dataset was
+    recorded) so each episode begins in-distribution.
 - `main.py` — `WebsocketClientPolicy → ActionChunkBroker(25) → PolicyAgent → Runtime(max_hz=30)`;
   tyro `Args` (note: tyro uses **hyphenated** flags: `--action-horizon`, `--dry-run`, …).
 - `README.md` — the two-process runbook (contract table, safety ladder, flag reference).

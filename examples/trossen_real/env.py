@@ -68,10 +68,10 @@ EFFORT_HISTORY_OFFSETS = tuple(4 * i - 36 for i in range(10))
 
 DEFAULT_PROMPT = "Grab and hand over the Rubik's cube to the other arm"
 
-# Resting "perch" start pose used during data collection (rad for the 6 arm joints, m for the
-# gripper carriage). Setting this makes the arms begin each episode in-distribution instead of
-# the follower's all-zeros default. Order: [joint_0..5, left_carriage_joint].
-PERCH_STAGED_POSITIONS = [0.0, np.pi / 3, np.pi / 6, np.pi / 5, 0.0, 0.0, 0.0]
+# Start pose the arms are staged to on connect (rad for the 6 arm joints, m for the gripper
+# carriage). All-zeros matches the pose the training dataset was recorded from, so each episode
+# begins in-distribution. Order: [joint_0..5, left_carriage_joint].
+STAGED_POSITIONS = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 
 class TrossenRealEnvironment(_environment.Environment):
@@ -121,9 +121,9 @@ class TrossenRealEnvironment(_environment.Environment):
             include_external_effort=True,
             left_arm_max_relative_target=max_relative_target,
             right_arm_max_relative_target=max_relative_target,
-            # Start each episode in-distribution at the data-collection "perch" pose.
-            left_arm_staged_positions=list(PERCH_STAGED_POSITIONS),
-            right_arm_staged_positions=list(PERCH_STAGED_POSITIONS),
+            # Start each episode in-distribution at the data-collection pose (all-zeros).
+            left_arm_staged_positions=list(STAGED_POSITIONS),
+            right_arm_staged_positions=list(STAGED_POSITIONS),
             cameras={
                 "cam_high": _cam(cam_high_serial),
                 "cam_left_wrist": _cam(cam_left_wrist_serial),
@@ -138,7 +138,7 @@ class TrossenRealEnvironment(_environment.Environment):
             dry_run,
         )
         self._robot = make_robot_from_config(config)
-        # connect() drives both arms to their staged "perch" pose and opens the cameras.
+        # connect() drives both arms to their staged start pose (all-zeros) and opens the cameras.
         self._robot.connect()
         logger.info("Follower connected. Cameras: %s", CAMERA_KEYS)
 

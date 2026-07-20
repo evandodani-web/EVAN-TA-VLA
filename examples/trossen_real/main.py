@@ -98,4 +98,6 @@ def main(args: Args) -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, force=True)
-    tyro.cli(main)
+    # Parse the dataclass directly (not `tyro.cli(main)`) so flags are `--host`/`--port`/… rather
+    # than `--args.host` — newer tyro nests a function's dataclass parameter under its name.
+    main(tyro.cli(Args))

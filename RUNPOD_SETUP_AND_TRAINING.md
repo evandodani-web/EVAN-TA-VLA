@@ -255,6 +255,9 @@ Both: `repo_id="trossen_bimanual_transfer_cube_tavla"`, `local_files_only=True`,
 | `FileNotFoundError: .../meta/info.json` under `~/.cache/huggingface/lerobot` | `LEROBOT_HOME` not set. openpi's lerobot 0.1.0 reads `LEROBOT_HOME` (not `HF_LEROBOT_HOME`); `export LEROBOT_HOME=/workspace/hf/lerobot`. |
 | `wandb: ERROR API key must be 40 characters long` | New-format `wandb_v1_...` key pasted into interactive `wandb login`. Use `export WANDB_API_KEY=...` instead. |
 | Training dies on SSH disconnect | Run inside `tmux` (§5). |
+| `ptxas too old` / `ptxas does not support CC 12.0` when serving locally | Local **RTX 5090 is Blackwell (sm_120)**; the pinned CUDA/JAX stack is too old. See §10 — upgrade the CUDA-12 libs to 12.9 **and** bump `jax`/`jaxlib` to `0.5.3`. |
+| `LLVM ERROR: Unsupported conversion from bf16 to f16` when serving locally | Same Blackwell issue — jaxlib 0.5.0's XLA can't codegen sm_120. Bumping `jax`/`jaxlib` to `0.5.3` fixes it (§10). |
+| Client: `Unrecognized options: --host … --port …` (tyro wants `--args.host`) | Newer tyro nests a function's dataclass param under its name. `examples/trossen_real/main.py` parses the dataclass directly (`main(tyro.cli(Args))`, like `serve_policy.py`) so flags are `--host`/`--port`/… as documented. Already fixed. |
 
 ---
 
@@ -285,7 +288,7 @@ cd ~/EVAN-TA-VLA && ~/lerobot_trossen/.venv/bin/python -m examples.trossen_real.
 ```
 
 The client maintains the 10-frame effort-history buffer at the training offsets, stages the arms
-to the data-collection perch pose, and enforces the follower `max_relative_target` clamp (plus
+to the data-collection start pose (all-zeros), and enforces the follower `max_relative_target` clamp (plus
 optional `--action-ema-alpha`). Full contract, `action_horizon` rationale, and the safety ladder
 are in `examples/trossen_real/README.md` and Phase 3 of `TROSSEN_TAVLA_FINDINGS_AND_PLAN.md`.
 Checkpoint verified present locally (5.8 GB, intact orbax OCDBT) on Jul 18 2026.
@@ -314,7 +317,7 @@ client. Run everything from `~/EVAN-TA-VLA`.
 1. Power on both follower arms; confirm reachable: `ping 192.168.1.5` and `ping 192.168.1.4`.
 2. Plug in the 3 RealSense cameras (high, left wrist, right wrist).
 3. **Clear the workspace and keep a hand on the E-stop** — the client drives both arms to the
-   perch pose **on connect, even in `--dry-run`**.
+   staged start pose (all-zeros) **on connect, even in `--dry-run`**.
 4. Place the Rubik's cube at the same start location used during data collection.
 
 ### 9c. Terminal 1 — start the model server (JAX venv)
@@ -327,7 +330,7 @@ cd ~/EVAN-TA-VLA
 Wait for `Creating server (host: …)`. Loading is fully local (weights + PaliGemma tokenizer are
 already cached — no internet needed). Serves on `0.0.0.0:8000`.
 
-### 9d. Terminal 2 — dry run (arms perch, but do NOT follow the policy)
+### 9d. Terminal 2 — dry run (arms stage to start pose, but do NOT follow the policy)
 ```bash
 cd ~/EVAN-TA-VLA
 ~/lerobot_trossen/.venv/bin/python -m examples.trossen_real.main \
@@ -336,10 +339,16 @@ cd ~/EVAN-TA-VLA
 ```
 Success signals:
 - Client logs `Server metadata: {...}` (websocket connected).
-- Both arms move to the perch pose; cameras open.
+- Both arms move to the start pose (all-zeros); cameras open.
 - Repeated `[dry-run] action (not sent): [ …14 numbers… ]` — eyeball them: no `nan`, arm joints
   roughly in radians (~±3), gripper dims (indices **6** and **13**) in a sane meters range. Arms
   stay still (policy actions are suppressed). `Ctrl-C` to stop.
+
+> **✅ Dry run verified (Jul 20 2026):** both arms connected (`192.168.1.5` / `192.168.1.4`), all 3
+> RealSense cameras opened, 150 steps of inference ran and returned clean 14-dim actions (no NaNs),
+> and the client disconnected cleanly (`Episode completed` → arms parked) — a strong sign the model
+> loaded and decoded correctly. (That run used the earlier perch staging; the staged start pose has
+> since been corrected to **all-zeros** to match the training dataset — see §10 note below / `env.py`.)
 
 ### 9e. Terminal 2 — guarded live run (arms follow the policy)
 Start short and slow; E-stop ready:
@@ -364,3 +373,59 @@ cd ~/EVAN-TA-VLA
   `effort[10,14]`, 3 image shapes) + explicit NaN/range checks in `env.py` to harden the gate.
 - **Ablation comparison:** re-serve with `pi0_trossen_transfer_effort_expert` (once that
   checkpoint exists) and run the same client to quantify the torque-awareness lift.
+
+---
+
+## 10. Serving locally on an RTX 5090 (Blackwell / sm_120) — JAX/CUDA fix ✅ applied Jul 20 2026
+
+The training venv (`~/EVAN-TA-VLA/.venv`) was built for the **H100 pod (sm_90)** and pins
+`jax[cuda12]==0.5.0`, whose bundled CUDA is 12.6. The **deploy machine's RTX 5090 is Blackwell
+(compute capability 12.0 / sm_120)**, which needs **CUDA ≥ 12.8** *and* an XLA that can codegen
+sm_120. Serving the checkpoint locally on 0.5.0 fails in two stages:
+
+1. `ptxas too old` / `ptxas does not support CC 12.0` — the CUDA 12.6 `ptxas` can't target sm_120.
+2. After bumping CUDA libs: `LLVM ERROR: Unsupported conversion from bf16 to f16` — jaxlib 0.5.0's
+   XLA itself lacks Blackwell codegen.
+
+**Fix (both steps required), run in the openpi venv:**
+```bash
+cd ~/EVAN-TA-VLA
+# 1) Modernize the CUDA-12 userspace libs to 12.9 (ptxas/cuBLAS/cuDNN/…). The 0.5.x CUDA plugin
+#    pins these as ">=", so this is allowed.
+uv pip install --python .venv/bin/python -U \
+  nvidia-cuda-nvcc-cu12 nvidia-cuda-runtime-cu12 nvidia-cuda-nvrtc-cu12 \
+  nvidia-cuda-cupti-cu12 nvidia-cublas-cu12 "nvidia-cudnn-cu12<10.0" \
+  nvidia-cufft-cu12 nvidia-cusolver-cu12 nvidia-cusparse-cu12 \
+  nvidia-curand-cu12 nvidia-nccl-cu12 nvidia-nvjitlink-cu12
+
+# 2) Bump JAX to 0.5.3 (ships CUDA 12.8, has sm_120 codegen). Stays patch-level within 0.5.x so
+#    openpi + flax==0.10.2 are unaffected.
+uv pip install --python .venv/bin/python -U "jax[cuda12]==0.5.3"
+```
+
+**Verify (must run OUTSIDE any sandbox so the GPU is visible):**
+```bash
+# GPU compiles for sm_120
+.venv/bin/python -c "import jax, jax.numpy as jnp; k=jax.random.key(0); x=jax.random.normal(k,(2048,2048)); print(jax.devices(), float((x@x).sum()))"
+# Full checkpoint load + one inference -> actions (50, 14), no NaNs
+.venv/bin/python -c "
+import numpy as np, pathlib, openpi.training.config as C
+from openpi.policies import policy_config as PC
+p = PC.create_trained_policy(C.get_config('pi0_trossen_transfer_effort_sota'),
+    pathlib.Path('checkpoints/pi0_trossen_transfer_effort_sota/run_001/29999'))
+o = {'state': np.zeros(14,np.float32), 'effort': np.zeros((10,14),np.float32),
+     'images': {c: np.zeros((480,640,3),np.uint8) for c in ('cam_high','cam_left_wrist','cam_right_wrist')},
+     'prompt': \"Grab and hand over the Rubik's cube to the other arm\"}
+a = np.asarray(p.infer(o)['actions']); print('actions', a.shape, 'NaN', bool(np.isnan(a).any()))
+"
+```
+
+> **⚠️ `uv sync` reverts this.** Re-running `uv sync` in this repo restores the pinned
+> `jax==0.5.0` + CUDA 12.6 and re-breaks local serving. After any `uv sync`, re-run the two
+> `uv pip install` commands above. (The bump is H100-safe too — jax 0.5.3 + CUDA 12.9 run fine on
+> sm_90 — so pinning `jax[cuda12]==0.5.3` in `pyproject.toml` would make it permanent for both the
+> pod and the deploy box, at the cost of touching the training deps. Not done yet; ask if you want
+> it pinned.)
+
+Verified Jul 20 2026: RTX 5090, driver 580.159.03, `jax 0.5.3`, CUDA 12.9 libs → checkpoint
+served on `0.0.0.0:8000`, inference returns `actions (50, 14)`.
