@@ -931,6 +931,30 @@ _CONFIGS = [
         ).get_freeze_filter(),
         ema_decay=None,
     ),
+    # Pure base pi0 ablation (no TA-VLA effort at all) on the same dataset.
+    # effort_type stays EffortType.NO (Pi0Config default) and no effort_history -> effort is
+    # never loaded, normed, or fed to the model. Same LoRA setup / steps / prompt as the two
+    # effort configs, so the ONLY difference is the removed torque machinery.
+    TrainConfig(
+        name="pi0_trossen_transfer_base",
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="trossen_bimanual_transfer_cube_tavla",
+            default_prompt="Grab and hand over the Rubik's cube to the other arm",
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
     # This config is used to demonstrate how to train on a simple simulated environment.
     TrainConfig(
         name="pi0_aloha_sim",

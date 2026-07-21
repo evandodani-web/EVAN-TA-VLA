@@ -107,10 +107,11 @@ def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseMod
             for key in data_config.action_sequence_keys
         }
     }
-    delta_timestamps["observation.effort"] = [t / dataset_meta.fps for t in data_config.effort_history]
+    if data_config.effort_history:
+        delta_timestamps["observation.effort"] = [t / dataset_meta.fps for t in data_config.effort_history]
 
-    if model_config.effort_type in (EffortType.EXPERT_FUT, EffortType.EXPERT_HIS_C_FUT, EffortType.EXPERT_HIS_C_L_FUT):
-        delta_timestamps["observation.effort"] += [(t + 1) / dataset_meta.fps for t in range(model_config.action_horizon)]
+        if model_config.effort_type in (EffortType.EXPERT_FUT, EffortType.EXPERT_HIS_C_FUT, EffortType.EXPERT_HIS_C_L_FUT):
+            delta_timestamps["observation.effort"] += [(t + 1) / dataset_meta.fps for t in range(model_config.action_horizon)]
     
     dataset = dataset_class(
         repo_id,
