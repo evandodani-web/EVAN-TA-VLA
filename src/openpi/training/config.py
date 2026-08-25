@@ -955,6 +955,41 @@ _CONFIGS = [
         ).get_freeze_filter(),
         ema_decay=None,
     ),
+    #
+    # Trossen bimanual "charger plug-in" — torque-aware pi0 (TA-VLA), SOTA "+obs+obj" variant.
+    # Data: v3.0 -> v2.x npz bridge output at
+    #   ~/.cache/huggingface/lerobot/trossen_bimanual_charger_plugin_tavla
+    #   56 episodes / 40,940 frames, observation.state(14) + observation.effort(14) + action(14)
+    #   + 3 cameras (cam_low dropped), fps=30. Same state layout as the cube dataset.
+    # Identical hyperparameters to pi0_trossen_transfer_effort_sota — only repo_id and the
+    # prompt differ — so the two tasks are directly comparable.
+    TrainConfig(
+        name="pi0_trossen_charger_plugin_effort_sota",
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_C_FUT,
+            effort_dim=14,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="trossen_bimanual_charger_plugin_tavla",
+            effort_history=tuple(4 * i - 36 for i in range(10)),  # 10 frames over ~1.2 s @ 30 fps
+            # Byte-identical to the dataset's task string, and must byte-match the deploy prompt.
+            default_prompt=(
+                "Unplug the charging cube from the power strip, plug it into the adjacent outlet, "
+                "then turn the power strip switch on"
+            ),
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
     # This config is used to demonstrate how to train on a simple simulated environment.
     TrainConfig(
         name="pi0_aloha_sim",

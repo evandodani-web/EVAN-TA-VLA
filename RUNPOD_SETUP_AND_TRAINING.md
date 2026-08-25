@@ -258,6 +258,12 @@ Both: `repo_id="trossen_bimanual_transfer_cube_tavla"`, `local_files_only=True`,
 | `ptxas too old` / `ptxas does not support CC 12.0` when serving locally | Local **RTX 5090 is Blackwell (sm_120)**; the pinned CUDA/JAX stack is too old. See §10 — upgrade the CUDA-12 libs to 12.9 **and** bump `jax`/`jaxlib` to `0.5.3`. |
 | `LLVM ERROR: Unsupported conversion from bf16 to f16` when serving locally | Same Blackwell issue — jaxlib 0.5.0's XLA can't codegen sm_120. Bumping `jax`/`jaxlib` to `0.5.3` fixes it (§10). |
 | Client: `Unrecognized options: --host … --port …` (tyro wants `--args.host`) | Newer tyro nests a function's dataclass param under its name. `examples/trossen_real/main.py` parses the dataclass directly (`main(tyro.cli(Args))`, like `serve_policy.py`) so flags are `--host`/`--port`/… as documented. Already fixed. |
+| `compute_norm_stats.py` runs for hours | It sets `num_batches = num_frames` but reads only `batch[key][0]`, so it loads 8 samples per used frame and cycles the dataset 8×. Bound it with `--max-frames` (§11c). |
+| Whole pod stops responding; even `echo` hangs in a new shell | Sustained multi-hundred-GB reads through the `/workspace` MooseFS FUSE mount inside the ~117 GB container cgroup. Bound the read volume and keep the dataset on **local** disk (§11d). It recovered on its own after ~1 h; a pod restart also clears it (`/workspace` is persistent). |
+| Training ~5 s/it and `nvidia-smi` util oscillates 0%/100% | Data-starved, not compute-bound. `TrainConfig.num_workers` defaults to **2** and the dataset is on the network mount. Copy the dataset to local disk and pass `--num-workers 8` (§11d). |
+| Loss flat for the first ~100 steps | Expected: `CosineDecaySchedule` warms up over **1,000 steps** from `peak_lr/1001` ≈ 2.5e-8. Judge the curve at step ≥1,000, not before. |
+| Prompt silently truncated | `Pi0Config.max_token_len = 48` including BOS + `\n`; the tokenizer only logs a warning. Check a new task's prompt fits (§11b). |
+| `pkill -f "scripts/train.py"` kills your own shell | The pattern matches the command line of the shell running `pkill`. Prefer `tmux kill-session -t train`, or a pattern that can't self-match. |
 
 ---
 
@@ -319,6 +325,9 @@ client. Run everything from `~/EVAN-TA-VLA`.
 3. **Clear the workspace and keep a hand on the E-stop** — the client drives both arms to the
    staged start pose (all-zeros) **on connect, even in `--dry-run`**.
 4. Place the Rubik's cube at the same start location used during data collection.
+5. **Confirm every near-constant joint is staged at its training value.** Any dimension with a
+   near-zero norm-stat std (e.g. the charger dataset's left gripper) normalizes by ~`1e-6`, so a
+   small physical offset becomes a huge out-of-distribution input. See §11e for the check.
 
 ### 9c. Terminal 1 — start the model server (JAX venv)
 ```bash
@@ -429,3 +438,154 @@ a = np.asarray(p.infer(o)['actions']); print('actions', a.shape, 'NaN', bool(np.
 
 Verified Jul 20 2026: RTX 5090, driver 580.159.03, `jax 0.5.3`, CUDA 12.9 libs → checkpoint
 served on `0.0.0.0:8000`, inference returns `actions (50, 14)`.
+
+---
+
+## 11. Training a **new dataset** — deltas + performance notes
+
+§1–§7 assume the Rubik's-cube dataset. This section is the delta for standing up a *different
+task*, using the **charger plug-in** run as the worked example (Aug 25 2026, RunPod **A100 80GB
+PCIe**). Read it before starting any new task — the two performance items (§11c, §11d) together
+cut that run from an estimated 40 h to ~23 h.
+
+### 11a. What actually changes per dataset
+
+| Thing | Cube | Charger |
+|---|---|---|
+| v3.0 source dir | `trossen-bimanual-transfer-cube-external-effort-v2` | `trossen-bimanual-charger-plugin-external-effort` |
+| npz intermediate (`--out`) | `~/tavla_intermediate` | `~/tavla_intermediate_charger` |
+| v2.x `--repo-id` | `trossen_bimanual_transfer_cube_tavla` | `trossen_bimanual_charger_plugin_tavla` |
+| Train config | `pi0_trossen_transfer_effort_sota` | `pi0_trossen_charger_plugin_effort_sota` |
+| Episodes / frames | 50 / 39,650 | 56 / 40,940 |
+
+`scripts/tavla_data/*.py` need **no code edits** provided the source is the same bimanual rig —
+28-dim `[L pos(7), L ext_eff(7), R pos(7), R ext_eff(7)]` state, 14-dim action, 4 cameras
+(`cam_low` is dropped by `DEFAULT_CAMERAS`). Only the three CLI paths above change.
+
+> `npz_to_lerobot_v2.py --repo-id` **defaults to the cube name**. Always pass it explicitly or
+> you will silently overwrite the cube dataset. Likewise give `--out` a fresh directory so you
+> don't mix `episode_*.npz` from two tasks.
+
+The new `TrainConfig` is a copy of the cube SOTA block with `repo_id` and `default_prompt`
+swapped — everything else (LoRA variants, `effort_type=EXPERT_HIS_C_FUT`, `effort_dim=14`,
+`effort_history`, 30k steps, freeze filter) stays identical so tasks remain comparable.
+
+### 11b. Check the prompt fits the token budget
+
+`Pi0Config.max_token_len = 48` **including** BOS and the trailing `\n`, and the tokenizer only
+logs a warning before truncating — a long task string can be silently cut. Verify before training:
+
+```bash
+.venv/bin/python -c "
+from openpi.models import tokenizer as T
+import openpi.training.config as C
+cfg = C.get_config('pi0_trossen_charger_plugin_effort_sota')
+tok = T.PaligemmaTokenizer(cfg.model.max_token_len)
+print('tokens used:', int(tok.tokenize(cfg.data.default_prompt)[1].sum()), '/', cfg.model.max_token_len)
+"
+```
+
+Charger prompt = **26/48** (the cube's is 16). Also confirm `default_prompt` byte-matches the
+dataset's stored task string, so training and deploy can't drift:
+
+```bash
+.venv/bin/python -c "
+import json; import openpi.training.config as C
+task = json.loads(open('$LEROBOT_HOME/trossen_bimanual_charger_plugin_tavla/meta/tasks.jsonl').readline())['task']
+print('match:', task == C.get_config('pi0_trossen_charger_plugin_effort_sota').data.default_prompt)
+"
+```
+
+### 11c. Norm stats — always bound with `--max-frames`
+
+`compute_norm_stats.py` sets `num_batches = num_frames` but consumes only `batch[key][0]`, so with
+its `local_batch_size` it loads several samples per *used* frame and cycles the dataset multiple
+times. On the charger set an unbounded run was on track for **~4 hours**; it also drove the
+sustained MooseFS reads that wedged the pod (§7). Bound it instead:
+
+```bash
+export LEROBOT_HOME=/workspace/hf/lerobot HF_LEROBOT_HOME=/workspace/hf/lerobot
+.venv/bin/python scripts/compute_norm_stats.py \
+  --config-name=pi0_trossen_charger_plugin_effort_sota --max-frames 6000
+```
+
+**5.5 minutes**, and `--max-frames` also switches the sampler to `shuffle=True`, so the frames are
+drawn randomly across all episodes rather than every Nth frame. 6,000 frames is far more than
+enough for per-dimension mean/std/q01/q99 over 14–32 dims. Run it in `tmux` — it is long enough
+to lose to a dropped shell.
+
+### 11d. Put the dataset on **local** disk and raise `num_workers`
+
+The single biggest speedup. `TrainConfig.num_workers` defaults to **2**, and `/workspace` is a
+MooseFS network mount, so AV1 decode starves the GPU (utilization visibly flapping 0%/100%).
+The dataset is only ~1 GB and the container has ~489 GB of local overlay disk:
+
+```bash
+mkdir -p /root/hf/lerobot
+cp -r /workspace/hf/lerobot/<repo_id> /root/hf/lerobot/
+
+tmux new -d -s train "cd /workspace/EVAN-TA-VLA && \
+  export LEROBOT_HOME=/root/hf/lerobot HF_LEROBOT_HOME=/root/hf/lerobot && \
+  .venv/bin/python scripts/train.py <config_name> \
+    --exp-name run_001 --num-workers 8 --no-wandb-enabled > /tmp/train.log 2>&1"
+```
+
+| | dataset on `/workspace`, 2 workers | dataset on local disk, 8 workers |
+|---|---|---|
+| rate | 4.9 s/it | **2.8–2.9 s/it** |
+| GPU util | ~50% (flapping) | ~100% (compute-bound) |
+| 30k-step ETA | ~40 h | **~23.5 h** |
+
+Keep **checkpoints** on `/workspace` (the repo lives there, so this is the default) — local disk
+does **not** survive a pod restart. Only the dataset copy is disposable; the canonical copy stays
+on `/workspace`. Spawning 8 workers adds ~4 min to startup as each re-imports JAX.
+
+### 11e. ⚠️ Check norm stats for near-constant dimensions before deploying
+
+`Normalize` computes `(x - mean) / (std + 1e-6)`. A dimension whose std is effectively zero
+therefore divides by ~`1e-6`, and any deploy-time reading that differs from the training constant
+produces an enormous normalized value — a **silent, severe out-of-distribution input** that
+corrupts the whole state token.
+
+**In the charger dataset the left gripper (index 6) never actuates:** `std = 4.2e-06` for
+`state` and `4.7e-05` for `action`. The left arm repositions with a fixed grip while the right
+gripper does the ~8 mm grasping. What this means:
+
+- **Training is unaffected.** The model learns to hold that joint constant and will never
+  meaningfully command it — un-normalization maps its output back to ≈ the constant.
+- **Deployment is not.** The left gripper **must be staged at the training constant (≈0)** before
+  the first observation is sent. A real reading of 1 cm normalizes to ~2000, versus the ±1 range
+  the model saw in training. The existing all-zeros staging pose (§9b, `env.py`
+  `STAGED_POSITIONS`) already satisfies this — do not change it for this task, and re-check it
+  for any future dataset.
+
+Run this against any new dataset's norm stats before the first live run:
+
+```bash
+.venv/bin/python -c "
+import json, numpy as np
+p='assets/<config_name>/<repo_id>/norm_stats.json'
+ns=json.load(open(p))['norm_stats']
+names=['L_j0','L_j1','L_j2','L_j3','L_j4','L_j5','L_grip','R_j0','R_j1','R_j2','R_j3','R_j4','R_j5','R_grip']
+for k in ('state','actions'):
+    s=np.array(ns[k]['std'])
+    print(k, 'zero-std dims:', np.where(s==0)[0].tolist(), '(expect 14..31 = padding only)')
+    for i,n in enumerate(names):
+        if s[i] < 1e-3: print(f'   !! near-constant: {n} (dim {i}) std={s[i]:.2e}')
+"
+```
+
+Zero std in dims **14–31 is expected** — that is the pad from 14 real dims up to `action_dim=32`.
+Anything flagged in dims 0–13 is a real joint that never moves; note it and stage that joint
+precisely at deploy.
+
+### 11f. Reference numbers (A100 80GB PCIe, batch 32)
+
+- **2.8–2.9 s/it** → ~23.5 h for 30k steps. An H100 is roughly 1.5–2× faster.
+- Startup to step 0: ~4 min with `pi0_base` cached (first ever run adds a ~12 GiB S3 restore).
+- GPU memory: JAX preallocates ~61 GB of 80 GB; batch 32 fits with headroom.
+- Checkpoint size: **8.8 GB** (`params` 5.8 GB + `train_state` + embedded `assets/norm_stats.json`).
+- Retention: saved every 1,000 steps, `max_to_keep=1` plus `keep_period=5000`, so only the latest
+  and multiples of 5,000 survive on disk.
+- Loss sanity (charger, SOTA): 0.369 @ step 0 → 0.246 @ 1k → 0.163 @ 4k. Flat before step ~1,000
+  is just the warmup (§7).
