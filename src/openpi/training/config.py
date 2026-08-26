@@ -990,6 +990,36 @@ _CONFIGS = [
         ).get_freeze_filter(),
         ema_decay=None,
     ),
+    # Pure base pi0 ablation for the charger plug-in task (no TA-VLA effort at all), the
+    # counterpart to pi0_trossen_transfer_base on the cube data. effort_type stays
+    # EffortType.NO (the Pi0Config default) and effort_history stays () so the effort column is
+    # never repacked, sampled, normalized, or fed to the model — action_in/out_proj keep the
+    # standard action_dim width and effort_proj is not built. Same dataset, LoRA setup, steps and
+    # prompt as pi0_trossen_charger_plugin_effort_sota, so the only difference is the removed
+    # torque machinery.
+    TrainConfig(
+        name="pi0_trossen_charger_plugin_base",
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="trossen_bimanual_charger_plugin_tavla",
+            default_prompt=(
+                "Unplug the charging cube from the power strip, plug it into the adjacent outlet, "
+                "then turn the power strip switch on"
+            ),
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
     # This config is used to demonstrate how to train on a simple simulated environment.
     TrainConfig(
         name="pi0_aloha_sim",
