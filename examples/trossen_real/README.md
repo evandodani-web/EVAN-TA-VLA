@@ -161,4 +161,20 @@ torque-awareness lift at the handover contact moment.
 | `--max-relative-target` | `1.0` | per-step joint clamp enforced by the follower (rad) |
 | `--action-ema-alpha` | `1.0` | absolute-space action smoothing (1.0 = off) |
 | `--dry-run` | off | assemble + query, never command the arms |
-| `--prompt` | training string | must byte-match the training `default_prompt` |
+| `--prompt` | training string | must byte-match the training `default_prompt` — **see warning below** |
+
+## ⚠️ `--prompt` defaults to the Rubik's-cube task
+
+`env.py` hardcodes `DEFAULT_PROMPT = "Grab and hand over the Rubik's cube to the other arm"`, and
+the client sends a `prompt` key on **every** observation. Server-side, `InjectDefaultPrompt` only
+fills that key when it is **absent**, so the client always wins and `serve_policy.py
+--default-prompt` is silently ignored.
+
+Serving any policy other than the cube ones therefore **requires** passing `--prompt` with that
+config's exact `default_prompt`. Getting it wrong produces no error — just a model acting on the
+wrong instruction. Current values:
+
+| Config | `--prompt` |
+|---|---|
+| `pi0_trossen_transfer_effort_sota` / `_expert` / `pi0_trossen_transfer_base` | `Grab and hand over the Rubik's cube to the other arm` (the default) |
+| `pi0_trossen_charger_plugin_effort_sota` | `Unplug the charging cube from the power strip, plug it into the adjacent outlet, then turn the power strip switch on` |

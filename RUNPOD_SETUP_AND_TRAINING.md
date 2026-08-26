@@ -587,5 +587,51 @@ precisely at deploy.
 - Checkpoint size: **8.8 GB** (`params` 5.8 GB + `train_state` + embedded `assets/norm_stats.json`).
 - Retention: saved every 1,000 steps, `max_to_keep=1` plus `keep_period=5000`, so only the latest
   and multiples of 5,000 survive on disk.
-- Loss sanity (charger, SOTA): 0.369 @ step 0 → 0.246 @ 1k → 0.163 @ 4k. Flat before step ~1,000
-  is just the warmup (§7).
+- Loss sanity (charger, SOTA): 0.369 @ step 0 → 0.246 @ 1k → 0.163 @ 4k → 0.052 @ 30k (converged;
+  grad_norm settles ~0.20). Flat before step ~1,000 is just the warmup (§7).
+
+### 11g. Deploying a new policy — what the Trossen box needs
+
+Three artifacts, in order:
+
+1. **Code** — `git pull` on the Trossen box. The new `TrainConfig` lives in
+   `src/openpi/training/config.py`; without it `--policy.config <config_name>` will not resolve.
+   The tracked `assets/<config>/<repo_id>/norm_stats.json` comes along too. (Serving does not
+   strictly need it — `create_trained_policy` deliberately loads norm stats from the
+   **checkpoint's** `assets/` dir so inference matches training exactly — but keep them in sync.)
+2. **Weights** — rsync the checkpoint (~9 GB). This is a *pull*, so run it **on the Trossen box**,
+   not on the pod (the pod has no route to itself and its own key isn't in its `authorized_keys`):
+   ```bash
+   rsync -rltvP --mkpath --no-owner --no-group --no-perms \
+     -e "ssh -p <POD_PORT> -i ~/.ssh/id_ed25519" \
+     root@<POD_IP>:/workspace/EVAN-TA-VLA/checkpoints/<config_name>/run_001/29999/ \
+     ~/EVAN-TA-VLA/checkpoints/<config_name>/run_001/29999/
+   ```
+3. **(RTX 5090 only)** re-apply the JAX/CUDA bump from §10 if `uv sync` has been run since.
+
+> ### ⚠️ Pass `--prompt` explicitly for any non-cube policy
+> `examples/trossen_real/env.py` hardcodes
+> `DEFAULT_PROMPT = "Grab and hand over the Rubik's cube to the other arm"`, and the client sends a
+> `prompt` key on **every** observation. `InjectDefaultPrompt` only fills the prompt when that key
+> is **absent**, so the client's value always wins and the server's `--default-prompt` is silently
+> ignored. Running the charger policy with the default would feed the model the cube instruction —
+> no error, just bad behaviour. Always pass the training `default_prompt` verbatim.
+
+Charger plug-in, two processes from `~/EVAN-TA-VLA`:
+
+```bash
+# Terminal 1 — model server (JAX venv)
+.venv/bin/python scripts/serve_policy.py --port 8000 \
+  policy:checkpoint --policy.config pi0_trossen_charger_plugin_effort_sota \
+  --policy.dir checkpoints/pi0_trossen_charger_plugin_effort_sota/run_001/29999
+
+# Terminal 2 — robot client (lerobot venv); drop --dry-run only after the dry run looks right
+~/lerobot_trossen/.venv/bin/python -m examples.trossen_real.main \
+  --host localhost --port 8000 --action-horizon 25 \
+  --max-episode-steps 150 --dry-run \
+  --prompt "Unplug the charging cube from the power strip, plug it into the adjacent outlet, then turn the power strip switch on"
+```
+
+Then follow the §9 safety ladder (dry run → guarded live with `--max-relative-target 1.0` and
+`--action-ema-alpha 0.5`), and honour the near-constant-joint staging check in §11e — for this
+dataset the **left gripper must start at ≈0**.
