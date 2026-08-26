@@ -1,7 +1,13 @@
 # TA-VLA pi0 — real Trossen deploy client
 
-Deploy the trained torque-aware **pi0** (`EXPERT_HIS_C_FUT`, config
-`pi0_trossen_transfer_effort_sota`) on the real Trossen bimanual WidowX AI arms.
+Deploy a trained torque-aware **pi0** (`EXPERT_HIS_C_FUT`) on the real Trossen bimanual WidowX AI
+arms. The same client serves every task — only the server's `--policy.config` / `--policy.dir`
+change, and the prompt is negotiated automatically over the websocket:
+
+| Task | config | checkpoint dir |
+|---|---|---|
+| Rubik's-cube handover | `pi0_trossen_transfer_effort_sota` | `checkpoints/pi0_trossen_transfer_effort_sota/run_001/29999` |
+| Charger plug-in | `pi0_trossen_charger_plugin_effort_sota` | `checkpoints/pi0_trossen_charger_plugin_effort_sota/run_001/29999` |
 
 The model is an openpi **JAX/orbax** checkpoint, so it is served by openpi's own websocket
 policy server. A thin robot client reuses `lerobot_robot_trossen` purely for hardware I/O and
@@ -23,7 +29,7 @@ The client sends observations already in `TavlaInputs` form (the server does **n
 | `state`  | `float32[14]`     | `[L joint_0..5, L carriage, R joint_0..5, R carriage]` (rad; grip m) |
 | `effort` | `float32[10,14]`  | 10 history frames `[L ext_eff(7), R ext_eff(7)]` (Nm/N), oldest→newest at offsets `(-36,-32,…,0)` |
 | `images` | 3× HWC uint8 RGB  | `cam_high`, `cam_left_wrist`, `cam_right_wrist` (server resizes→224) |
-| `prompt` | str               | `"Grab and hand over the Rubik's cube to the other arm"`           |
+| `prompt` | str               | the served policy's training prompt, read from the server metadata (see below) |
 
 The server returns `{"actions": np[50,14]}` already **absolute** (it un-deltas with the `state`
 we send and strips the predicted future effort). `ActionChunkBroker` hands the client one
@@ -69,11 +75,23 @@ values as fallbacks:
 ## Run
 
 ### Process A — model server (`~/EVAN-TA-VLA/.venv`, JAX + GPU)
+
+Rubik's-cube handover:
 ```bash
 cd ~/EVAN-TA-VLA && .venv/bin/python scripts/serve_policy.py --port 8000 \
   policy:checkpoint --policy.config pi0_trossen_transfer_effort_sota \
   --policy.dir checkpoints/pi0_trossen_transfer_effort_sota/run_001/29999
 ```
+
+Charger plug-in:
+```bash
+cd ~/EVAN-TA-VLA && .venv/bin/python scripts/serve_policy.py --port 8000 \
+  policy:checkpoint --policy.config pi0_trossen_charger_plugin_effort_sota \
+  --policy.dir checkpoints/pi0_trossen_charger_plugin_effort_sota/run_001/29999
+```
+
+Wait for `Creating server (host: …)` before starting the client. Loading is fully local (weights and
+the PaliGemma tokenizer are cached — no internet needed).
 
 > **RTX 5090 (Blackwell) note:** serving locally requires a JAX/CUDA stack that targets sm_120.
 > The pinned `jax==0.5.0` (CUDA 12.6) fails with `ptxas too old` / `bf16→f16` errors. Fix (applied
@@ -86,6 +104,13 @@ cd ~/EVAN-TA-VLA && .venv/bin/python scripts/serve_policy.py --port 8000 \
 > `_METADATA`/`_sharding`, and embedded `assets/norm_stats.json` with keys `state(32)`,
 > `actions(32)`, `effort(14)`. `serve_policy.py` loads norm stats from the checkpoint's own
 > `assets/`, so no external norm-stats file is needed to serve.
+
+> **Charger checkpoint present & verified (Aug 26 2026):**
+> `checkpoints/pi0_trossen_charger_plugin_effort_sota/run_001/29999` — **8.9 GB** (`params` +
+> `train_state`), with `assets/norm_stats.json` (`state(32)`, `actions(32)`, `effort(14)`) and
+> `assets/datasets.txt` naming `trossen_bimanual_charger_plugin_tavla`. The config resolves and
+> reports `EffortType.EXPERT_HIS_C_FUT` with `effort_history=(-36, -32, …, 0)`, matching the
+> client's `EFFORT_HISTORY_OFFSETS`.
 
 ### Process B — robot client (`~/lerobot_trossen/.venv`)
 > tyro uses **hyphenated** flags (`--action-horizon`, `--dry-run`, `--max-episode-steps`, …).
@@ -105,7 +130,8 @@ even in `--dry-run`. `--dry-run` only suppresses the *policy* actions (arms won'
 |---|---|---|
 | JAX sees the GPU | `.venv/bin/python -c "import jax; print(jax.devices())"` | `[CudaDevice(id=0)]` (RTX 5090, ~22 GB free) |
 | No competing GPU load | `nvidia-smi` | enough free VRAM for the 5.8 GB checkpoint |
-| Checkpoint present | `du -sh checkpoints/pi0_trossen_transfer_effort_sota/run_001/29999` | `5.8G` |
+| Checkpoint present | `du -sh checkpoints/<config>/run_001/29999` | `5.8G` (cube, params only) / `8.9G` (charger, params + train_state) |
+| JAX/CUDA bump still applied (RTX 5090) | `.venv/bin/python -c "import jax; print(jax.__version__)"` | `0.5.3` — if it says `0.5.0`, re-apply §10 of `RUNPOD_SETUP_AND_TRAINING.md` |
 | Client stack imports | `~/lerobot_trossen/.venv/bin/python -c "import openpi_client, tyro, trossen_arm, pyrealsense2, lerobot_robot_trossen; import examples.trossen_real.main"` | no error |
 | Hardware env vars set | `echo $FOLLOWER_LEFT_IP_ADDR $FOLLOWER_RIGHT_IP_ADDR $CAM_HIGH_SN $CAM_LEFT_WRIST_SN $CAM_RIGHT_WRIST_SN` | IPs + 3 serials |
 
@@ -117,11 +143,23 @@ even in `--dry-run`. `--dry-run` only suppresses the *policy* actions (arms won'
 2. Plug in the 3 RealSense cameras (high, left wrist, right wrist).
 3. **Clear the workspace and keep a hand on the E-stop** — the client drives both arms to the
    staged start pose (all-zeros) **on connect, even in `--dry-run`**.
-4. Place the Rubik's cube at the same start location used during data collection.
+4. Place the task objects at the same start location used during data collection — the Rubik's cube
+   (cube task), or the charging cube plugged into the power strip with the switch off (charger task).
+5. **Charger task only — confirm the left gripper is fully closed before the first observation.**
+   In that dataset the left gripper never actuates: `state[6]` takes only 14 distinct values
+   (the 3.34 µm encoder quantum) spanning ±22 µm, because the leader's trigger was released the
+   whole time and the carriage rested on its closed hard stop. `Normalize` divides by `std + 1e-6`
+   ≈ `5.2e-6`, so a gripper held open by 0.1 mm normalizes to ~19 and 1 cm to ~1900, versus the
+   ~±4 the model trained on — a silent, severe out-of-distribution state token. The all-zeros
+   staging pose satisfies this on its own; the failure modes are something physically blocking the
+   fingers from closing, or a carriage zero that has drifted since data collection. See §11e of
+   `RUNPOD_SETUP_AND_TRAINING.md`.
 
 ### 1. Server smoke
 Start Process A (server), then Process B with `--dry-run` — the client should log
-`Server metadata: {...}` on connect.
+`Server metadata: {...}` on connect, followed by `Using prompt: '…'`. Confirm that line names the
+task you intend to run before letting the arms move; for the charger policy it must read
+`Unplug the charging cube from the power strip, plug it into the adjacent outlet, then turn the power strip switch on`.
 
 ### 2. Dry run (arms stage to start pose, but do NOT follow the policy)
 ```bash
