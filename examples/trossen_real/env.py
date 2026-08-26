@@ -66,7 +66,9 @@ CAMERA_KEYS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 # Must byte-match `effort_history` in `pi0_trossen_transfer_effort_sota`.
 EFFORT_HISTORY_OFFSETS = tuple(4 * i - 36 for i in range(10))
 
-DEFAULT_PROMPT = "Grab and hand over the Rubik's cube to the other arm"
+# No default prompt on purpose: the prompt must match the served policy's training string, and a
+# stale default is silent (the server only injects its own prompt when the key is absent, so a
+# client-side prompt always wins). `main.py` resolves it from the server's metadata instead.
 
 # Start pose the arms are staged to on connect (rad for the 6 arm joints, m for the gripper
 # carriage). All-zeros matches the pose the training dataset was recorded from, so each episode
@@ -85,7 +87,7 @@ class TrossenRealEnvironment(_environment.Environment):
         cam_high_serial: Optional[str] = None,  # noqa: UP007
         cam_left_wrist_serial: Optional[str] = None,  # noqa: UP007
         cam_right_wrist_serial: Optional[str] = None,  # noqa: UP007
-        prompt: str = DEFAULT_PROMPT,
+        prompt: str,
         effort_history_offsets: tuple[int, ...] = EFFORT_HISTORY_OFFSETS,
         max_relative_target: float | None = 1.0,
         action_ema_alpha: float = 1.0,

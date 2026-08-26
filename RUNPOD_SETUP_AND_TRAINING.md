@@ -609,13 +609,14 @@ Three artifacts, in order:
    ```
 3. **(RTX 5090 only)** re-apply the JAX/CUDA bump from §10 if `uv sync` has been run since.
 
-> ### ⚠️ Pass `--prompt` explicitly for any non-cube policy
-> `examples/trossen_real/env.py` hardcodes
-> `DEFAULT_PROMPT = "Grab and hand over the Rubik's cube to the other arm"`, and the client sends a
-> `prompt` key on **every** observation. `InjectDefaultPrompt` only fills the prompt when that key
-> is **absent**, so the client's value always wins and the server's `--default-prompt` is silently
-> ignored. Running the charger policy with the default would feed the model the cube instruction —
-> no error, just bad behaviour. Always pass the training `default_prompt` verbatim.
+> ### The prompt is negotiated automatically — do not pass `--prompt`
+> The client sends a `prompt` key on **every** observation and `InjectDefaultPrompt` only fills that
+> key when it is **absent**, so a client-side prompt always wins and the server's
+> `--default-prompt` is ignored. A hardcoded client prompt therefore fails *silently* when serving
+> a different task. The server now advertises its training prompt in the websocket metadata and the
+> client adopts it, so **omit `--prompt`** and instead confirm the `Using prompt: '…'` line the
+> client logs at startup. Passing `--prompt` is an override; the client warns if it disagrees with
+> the server.
 
 Charger plug-in, two processes from `~/EVAN-TA-VLA`:
 
@@ -628,9 +629,12 @@ Charger plug-in, two processes from `~/EVAN-TA-VLA`:
 # Terminal 2 — robot client (lerobot venv); drop --dry-run only after the dry run looks right
 ~/lerobot_trossen/.venv/bin/python -m examples.trossen_real.main \
   --host localhost --port 8000 --action-horizon 25 \
-  --max-episode-steps 150 --dry-run \
-  --prompt "Unplug the charging cube from the power strip, plug it into the adjacent outlet, then turn the power strip switch on"
+  --max-episode-steps 150 --dry-run
 ```
+
+The client will log
+`Using prompt: 'Unplug the charging cube from the power strip, plug it into the adjacent outlet, then turn the power strip switch on'`
+— check that before letting it move.
 
 Then follow the §9 safety ladder (dry run → guarded live with `--max-relative-target 1.0` and
 `--action-ema-alpha 0.5`), and honour the near-constant-joint staging check in §11e — for this

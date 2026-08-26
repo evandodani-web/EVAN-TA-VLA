@@ -38,8 +38,10 @@ class Args:
     num_episodes: int = 1
     max_episode_steps: int = 1000
 
-    # Language prompt injected into every observation. MUST byte-match the training default_prompt.
-    prompt: str = _env.DEFAULT_PROMPT
+    # Language prompt injected into every observation. Leave unset to adopt the prompt the served
+    # policy was trained with (read from the server's metadata) — that is the safe default. Only
+    # set this to deliberately override, and then it must byte-match the training default_prompt.
+    prompt: str | None = None
 
     # Safety: per-step relative joint-target clamp enforced by the follower (rad). None disables.
     max_relative_target: float | None = 1.0
@@ -62,7 +64,23 @@ def main(args: Args) -> None:
         host=args.host,
         port=args.port,
     )
-    logging.info(f"Server metadata: {ws_client_policy.get_server_metadata()}")
+    server_metadata = ws_client_policy.get_server_metadata()
+    logging.info(f"Server metadata: {server_metadata}")
+
+    prompt = args.prompt if args.prompt is not None else server_metadata.get("default_prompt")
+    if not prompt:
+        raise SystemExit(
+            "Server did not advertise a 'default_prompt' and --prompt was not given. Pass the "
+            "served config's default_prompt verbatim, or update the server to openpi with prompt "
+            "metadata."
+        )
+    if args.prompt is not None and args.prompt != server_metadata.get("default_prompt"):
+        logging.warning(
+            "--prompt differs from the served policy's training prompt.\n  given:  %r\n  server: %r",
+            args.prompt,
+            server_metadata.get("default_prompt"),
+        )
+    logging.info("Using prompt: %r", prompt)
 
     environment = _env.TrossenRealEnvironment(
         left_arm_ip=args.left_arm_ip,
@@ -70,7 +88,7 @@ def main(args: Args) -> None:
         cam_high_serial=args.cam_high_serial,
         cam_left_wrist_serial=args.cam_left_wrist_serial,
         cam_right_wrist_serial=args.cam_right_wrist_serial,
-        prompt=args.prompt,
+        prompt=prompt,
         max_relative_target=args.max_relative_target,
         action_ema_alpha=args.action_ema_alpha,
         dry_run=args.dry_run,

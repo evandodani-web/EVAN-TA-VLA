@@ -161,20 +161,30 @@ torque-awareness lift at the handover contact moment.
 | `--max-relative-target` | `1.0` | per-step joint clamp enforced by the follower (rad) |
 | `--action-ema-alpha` | `1.0` | absolute-space action smoothing (1.0 = off) |
 | `--dry-run` | off | assemble + query, never command the arms |
-| `--prompt` | training string | must byte-match the training `default_prompt` — **see warning below** |
+| `--prompt` | *(unset — taken from the server)* | deliberate override only; see below |
 
-## ⚠️ `--prompt` defaults to the Rubik's-cube task
+## The prompt comes from the server — leave `--prompt` unset
 
-`env.py` hardcodes `DEFAULT_PROMPT = "Grab and hand over the Rubik's cube to the other arm"`, and
-the client sends a `prompt` key on **every** observation. Server-side, `InjectDefaultPrompt` only
-fills that key when it is **absent**, so the client always wins and `serve_policy.py
---default-prompt` is silently ignored.
+The client sends a `prompt` key on **every** observation, and server-side `InjectDefaultPrompt`
+only fills that key when it is **absent**. So whatever the client sends always wins, and
+`serve_policy.py --default-prompt` is ignored. A hardcoded client prompt therefore breaks
+*silently* the moment you serve a different task — the model just acts on the wrong instruction,
+with no error.
 
-Serving any policy other than the cube ones therefore **requires** passing `--prompt` with that
-config's exact `default_prompt`. Getting it wrong produces no error — just a model acting on the
-wrong instruction. Current values:
+To remove that footgun the server advertises its training prompt in the websocket metadata
+(`create_trained_policy` puts `default_prompt` there) and the client adopts it. **There is no
+client-side default prompt any more.**
 
-| Config | `--prompt` |
+- **Normal use: omit `--prompt`.** At startup the client logs `Using prompt: '…'` — confirm that
+  line names the task you intend to run.
+- **Pass `--prompt` only to deliberately override.** If it differs from the server's, the client
+  logs a warning showing both strings.
+- If the server advertises no prompt (older server, or a config with `default_prompt=None`), the
+  client exits with a clear error instead of guessing.
+
+For reference, the prompts each config is trained with — you should not need to type these:
+
+| Config | training prompt |
 |---|---|
-| `pi0_trossen_transfer_effort_sota` / `_expert` / `pi0_trossen_transfer_base` | `Grab and hand over the Rubik's cube to the other arm` (the default) |
+| `pi0_trossen_transfer_effort_sota` / `_expert` / `pi0_trossen_transfer_base` | `Grab and hand over the Rubik's cube to the other arm` |
 | `pi0_trossen_charger_plugin_effort_sota` | `Unplug the charging cube from the power strip, plug it into the adjacent outlet, then turn the power strip switch on` |

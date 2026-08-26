@@ -62,6 +62,14 @@ def create_trained_policy(
         norm_stats = _checkpoints.load_norm_stats(checkpoint_dir / "assets")
     norm_stats_wo_effort = {k: v for k, v in norm_stats.items() if k != "effort"}
 
+    # Advertise the prompt this policy expects so clients can adopt it instead of hardcoding a
+    # task string. A client that sends its own "prompt" key still wins (InjectDefaultPrompt only
+    # fills an absent key), so a mismatched hardcoded prompt would otherwise pass silently.
+    effective_prompt = default_prompt if default_prompt is not None else getattr(train_config.data, "default_prompt", None)
+    metadata = dict(train_config.policy_metadata or {})
+    if effective_prompt is not None:
+        metadata["default_prompt"] = effective_prompt
+
     return _policy.Policy(
         model,
         transforms=[
@@ -78,5 +86,5 @@ def create_trained_policy(
             *repack_transforms.outputs,
         ],
         sample_kwargs=sample_kwargs,
-        metadata=train_config.policy_metadata,
+        metadata=metadata,
     )
