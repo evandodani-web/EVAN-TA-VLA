@@ -94,9 +94,13 @@ Wait for `Creating server (host: …)` before starting the client. Loading is fu
 the PaliGemma tokenizer are cached — no internet needed).
 
 > **RTX 5090 (Blackwell) note:** serving locally requires a JAX/CUDA stack that targets sm_120.
-> The pinned `jax==0.5.0` (CUDA 12.6) fails with `ptxas too old` / `bf16→f16` errors. Fix (applied
-> Jul 20 2026): upgrade the CUDA-12 libs to 12.9 and bump `jax`/`jaxlib` to `0.5.3` — see §10 of
-> `RUNPOD_SETUP_AND_TRAINING.md`. Note `uv sync` reverts it.
+> The pinned `jax==0.5.0` (CUDA 12.6) fails with `ptxas too old` / `bf16→f16` errors. Fix: upgrade
+> the CUDA-12 libs to 12.9 and bump `jax`/`jaxlib` to `0.5.3` — see §10 of
+> `RUNPOD_SETUP_AND_TRAINING.md`. **`uv sync` reverts it, and the revert is silent until you try to
+> serve** — it surfaced again on Aug 26 2026 as
+> `XlaRuntimeError: UNIMPLEMENTED: … ptxas too old` while loading the charger checkpoint. Both
+> halves must be re-applied; check `jax.__version__` **and** `ptxas --version` (see the pre-flight
+> table), since the CUDA libs can revert while `jax` still reads `0.5.3`.
 
 > **Checkpoint present & verified (Jul 18 2026):** the trained SOTA checkpoint was rsync'd back
 > from the pod to `checkpoints/pi0_trossen_transfer_effort_sota/run_001/29999` — **5.8 GB**, intact
@@ -131,7 +135,7 @@ even in `--dry-run`. `--dry-run` only suppresses the *policy* actions (arms won'
 | JAX sees the GPU | `.venv/bin/python -c "import jax; print(jax.devices())"` | `[CudaDevice(id=0)]` (RTX 5090, ~22 GB free) |
 | No competing GPU load | `nvidia-smi` | enough free VRAM for the 5.8 GB checkpoint |
 | Checkpoint present | `du -sh checkpoints/<config>/run_001/29999` | `5.8G` (cube, params only) / `8.9G` (charger, params + train_state) |
-| JAX/CUDA bump still applied (RTX 5090) | `.venv/bin/python -c "import jax; print(jax.__version__)"` | `0.5.3` — if it says `0.5.0`, re-apply §10 of `RUNPOD_SETUP_AND_TRAINING.md` |
+| JAX/CUDA bump still applied (RTX 5090) | `.venv/bin/python -c "import jax; print(jax.__version__)"` and `.venv/lib/python3.11/site-packages/nvidia/cuda_nvcc/bin/ptxas --version \| tail -2` | `0.5.3` and `release 12.9` — **check both**; either one reverting breaks serving. Re-apply §10 of `RUNPOD_SETUP_AND_TRAINING.md` |
 | Client stack imports | `~/lerobot_trossen/.venv/bin/python -c "import openpi_client, tyro, trossen_arm, pyrealsense2, lerobot_robot_trossen; import examples.trossen_real.main"` | no error |
 | Hardware env vars set | `echo $FOLLOWER_LEFT_IP_ADDR $FOLLOWER_RIGHT_IP_ADDR $CAM_HIGH_SN $CAM_LEFT_WRIST_SN $CAM_RIGHT_WRIST_SN` | IPs + 3 serials |
 

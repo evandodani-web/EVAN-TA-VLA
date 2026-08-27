@@ -439,6 +439,21 @@ a = np.asarray(p.infer(o)['actions']); print('actions', a.shape, 'NaN', bool(np.
 Verified Jul 20 2026: RTX 5090, driver 580.159.03, `jax 0.5.3`, CUDA 12.9 libs → checkpoint
 served on `0.0.0.0:8000`, inference returns `actions (50, 14)`.
 
+**Recurred and re-applied Aug 26 2026.** The venv had reverted to `jax 0.5.0` + `ptxas 12.6.85`
+(CUDA libs at 12.4), and loading the charger checkpoint died at
+`nnx.eval_shape(self.create, jax.random.key(0))` with
+`XlaRuntimeError: UNIMPLEMENTED: …/ptxas ptxas too old. Falling back to the driver to compile.`,
+preceded by the warning `ptxas does not support CC 12.0`. Two things worth knowing:
+
+- **Checking `jax.__version__` alone is not sufficient.** The CUDA libs and `jax` revert
+  independently, so verify `ptxas --version` reports `release 12.9` as well:
+  ```bash
+  .venv/lib/python3.11/site-packages/nvidia/cuda_nvcc/bin/ptxas --version | tail -2
+  ```
+- **Step 2 also pulls newer `numpy`/`scipy`/`ml-dtypes`** (`numpy 2.0.2 → 2.4.6`,
+  `scipy 1.14.1 → 1.17.1`, `ml-dtypes 0.5.0 → 0.6.0`) as transitive deps of `jax 0.5.3`. Serving is
+  unaffected — re-verified on the charger checkpoint: `actions (50, 14)`, no NaNs, `absmax 0.17`.
+
 ---
 
 ## 11. Training a **new dataset** — deltas + performance notes
