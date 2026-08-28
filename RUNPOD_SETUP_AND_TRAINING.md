@@ -255,7 +255,8 @@ Both: `repo_id="trossen_bimanual_transfer_cube_tavla"`, `local_files_only=True`,
 | `FileNotFoundError: .../meta/info.json` under `~/.cache/huggingface/lerobot` | `LEROBOT_HOME` not set. openpi's lerobot 0.1.0 reads `LEROBOT_HOME` (not `HF_LEROBOT_HOME`); `export LEROBOT_HOME=/workspace/hf/lerobot`. |
 | `wandb: ERROR API key must be 40 characters long` | New-format `wandb_v1_...` key pasted into interactive `wandb login`. Use `export WANDB_API_KEY=...` instead. |
 | Training dies on SSH disconnect | Run inside `tmux` (§5). |
-| `ptxas too old` / `ptxas does not support CC 12.0` when serving locally | Local **RTX 5090 is Blackwell (sm_120)**; the pinned CUDA/JAX stack is too old. See §10 — upgrade the CUDA-12 libs to 12.9 **and** bump `jax`/`jaxlib` to `0.5.3`. |
+| `ptxas too old` / `ptxas does not support CC 12.0` when serving locally | Local **RTX 5090 is Blackwell (sm_120)**; the pinned CUDA/JAX stack is too old. Run `scripts/fix_blackwell_cuda.sh` (§10). Recurs after every `uv sync`. |
+| Segfault (exit 139) in any matmul, but `jax.devices()` looks fine | CUDA 12.9 libs on a driver that is too old — e.g. the Blackwell fix applied to the A100 pod (driver 550.90.12). `uv sync` restores a working stack; see §10a. |
 | `LLVM ERROR: Unsupported conversion from bf16 to f16` when serving locally | Same Blackwell issue — jaxlib 0.5.0's XLA can't codegen sm_120. Bumping `jax`/`jaxlib` to `0.5.3` fixes it (§10). |
 | Client: `Unrecognized options: --host … --port …` (tyro wants `--args.host`) | Newer tyro nests a function's dataclass param under its name. `examples/trossen_real/main.py` parses the dataclass directly (`main(tyro.cli(Args))`, like `serve_policy.py`) so flags are `--host`/`--port`/… as documented. Already fixed. |
 | `compute_norm_stats.py` runs for hours | It sets `num_batches = num_frames` but reads only `batch[key][0]`, so it loads 8 samples per used frame and cycles the dataset 8×. Bound it with `--max-frames` (§11c). |
@@ -429,12 +430,34 @@ a = np.asarray(p.infer(o)['actions']); print('actions', a.shape, 'NaN', bool(np.
 "
 ```
 
-> **⚠️ `uv sync` reverts this.** Re-running `uv sync` in this repo restores the pinned
-> `jax==0.5.0` + CUDA 12.6 and re-breaks local serving. After any `uv sync`, re-run the two
-> `uv pip install` commands above. (The bump is H100-safe too — jax 0.5.3 + CUDA 12.9 run fine on
-> sm_90 — so pinning `jax[cuda12]==0.5.3` in `pyproject.toml` would make it permanent for both the
-> pod and the deploy box, at the cost of touching the training deps. Not done yet; ask if you want
-> it pinned.)
+> **⚠️ `uv sync` reverts this.** Re-running `uv sync` restores the pinned `jax==0.5.0` + CUDA 12.6
+> and re-breaks local serving. Rather than retyping the two commands, run
+> **`scripts/fix_blackwell_cuda.sh`** after any `uv sync`; `--check` verifies without changing
+> anything. It checks jax, `ptxas` *and* a real GPU matmul, and refuses to run on a machine whose
+> driver is too old (see below).
+
+### 10a. This fix is for the **Blackwell deploy box only** — it breaks the A100 pod
+
+Tested Aug 28 2026: applying the fix on the **A100 pod (driver 550.90.12, max CUDA 12.4)** leaves
+`import jax` and `jax.devices()` working — reporting `[CudaDevice(id=0)]` — while **any matmul
+≥ 512×512 SIGSEGVs inside cuBLAS** (exit 139). A 4×4 matmul and `jax.random.normal` still succeed,
+so a superficial check looks fine and training/serving would die later. `uv sync` restores a
+working stack.
+
+The CUDA 12.9 userspace libraries need a driver new enough to support them; the verified 5090 box
+runs **driver 580.159.03**. The earlier claim that this bump is "H100-safe too" is therefore only
+true where the driver is recent enough — it is a **driver** constraint, not an architecture one.
+`fix_blackwell_cuda.sh` enforces this by refusing to apply when `nvidia-smi` reports a max CUDA
+below 12.9 (override with `--force`).
+
+**Why this is not pinned in `pyproject.toml`.** Bumping the pin there has no effect unless
+`uv.lock` is regenerated, and re-resolving currently fails on a pre-existing, unrelated conflict:
+`lerobot 0.1.0` requires `pyav`, which has no wheel for the Python 3.13 + macOS split that
+`requires-python = ">=3.11"` forces uv to solve. (`uv lock` appears to succeed today only because
+it validates the existing lock rather than re-resolving.) Fixing that means narrowing
+`requires-python` or restricting resolution to Linux, then re-resolving all 254 packages — which
+would change the environment both charger policies were trained in. The script is the contained
+alternative.
 
 Verified Jul 20 2026: RTX 5090, driver 580.159.03, `jax 0.5.3`, CUDA 12.9 libs → checkpoint
 served on `0.0.0.0:8000`, inference returns `actions (50, 14)`.
@@ -637,7 +660,9 @@ Three artifacts, in order:
      root@<POD_IP>:/workspace/EVAN-TA-VLA/checkpoints/<config_name>/run_001/29999/ \
      ~/EVAN-TA-VLA/checkpoints/<config_name>/run_001/29999/
    ```
-3. **(RTX 5090 only)** re-apply the JAX/CUDA bump from §10 if `uv sync` has been run since.
+3. **(RTX 5090 deploy box only)** re-apply the JAX/CUDA bump if `uv sync` has been run since:
+   `scripts/fix_blackwell_cuda.sh` (or `--check` to verify first). Do **not** run it on the
+   training pod — its driver is too old and the CUDA 12.9 libs segfault in cuBLAS (§10a).
 
 > ### The prompt is negotiated automatically — do not pass `--prompt`
 > The client sends a `prompt` key on **every** observation and `InjectDefaultPrompt` only fills that
