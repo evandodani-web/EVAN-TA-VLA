@@ -470,8 +470,13 @@ cut that run from an estimated 40 h to ~23 h.
 | v3.0 source dir | `trossen-bimanual-transfer-cube-external-effort-v2` | `trossen-bimanual-charger-plugin-external-effort` |
 | npz intermediate (`--out`) | `~/tavla_intermediate` | `~/tavla_intermediate_charger` |
 | v2.x `--repo-id` | `trossen_bimanual_transfer_cube_tavla` | `trossen_bimanual_charger_plugin_tavla` |
-| Train config | `pi0_trossen_transfer_effort_sota` | `pi0_trossen_charger_plugin_effort_sota` |
+| Train config (SOTA) | `pi0_trossen_transfer_effort_sota` | `pi0_trossen_charger_plugin_effort_sota` |
+| Train config (base ablation) | `pi0_trossen_transfer_base` | `pi0_trossen_charger_plugin_base` |
 | Episodes / frames | 50 / 39,650 | 56 / 40,940 |
+
+Both configs for a task share one dataset — the base ablation reuses it untouched, since an empty
+`effort_history` means the effort column is never repacked or sampled. Only norm stats are
+per-config (they are keyed by config name), and the base run's contain no `effort` key.
 
 `scripts/tavla_data/*.py` need **no code edits** provided the source is the same bimanual rig —
 28-dim `[L pos(7), L ext_eff(7), R pos(7), R ext_eff(7)]` state, 14-dim action, 4 cameras
@@ -604,6 +609,16 @@ precisely at deploy.
   and multiples of 5,000 survive on disk.
 - Loss sanity (charger, SOTA): 0.369 @ step 0 → 0.246 @ 1k → 0.163 @ 4k → 0.052 @ 30k (converged;
   grad_norm settles ~0.20). Flat before step ~1,000 is just the warmup (§7).
+- Loss sanity (charger, **base**): 0.141 @ step 0 → 0.041 @ 4k → 0.023 @ 10k → 0.011 @ 22k →
+  0.008 @ 30k (grad_norm ~0.12). Checkpoints are **8.9 GB** (slightly under SOTA's 9.0 GB — no
+  `effort_proj` and the action projections stay at `action_dim` instead of widening to 46).
+- Both charger runs took ~25 h wall-clock for 30k steps on the A100.
+
+> **Do not compare SOTA and base training losses.** The SOTA objective is
+> `action_loss + 0.1 * effort_loss` over a 46-wide projection (32 action dims + 14 predicted
+> future-torque dims); base optimizes 32 action dims only. Base's much lower number reflects an
+> easier objective, not a better policy. Compare the two on **task success on the real arms**
+> (grasp stability, over-squeeze, contact timing) — see §6 of `BASE_PI0_ABLATION.md`.
 
 ### 11g. Deploying a new policy — what the Trossen box needs
 
@@ -633,15 +648,50 @@ Three artifacts, in order:
 > client logs at startup. Passing `--prompt` is an override; the client warns if it disagrees with
 > the server.
 
-Charger plug-in, two processes from `~/EVAN-TA-VLA`:
+#### Charger plug-in — concrete commands
+
+Both charger policies were trained on the **A100 pod at `38.128.233.145:28544`** (pod host/port
+change every pod — take them from `$RUNPOD_PUBLIC_IP` / `$RUNPOD_TCP_PORT_22` on the pod).
+
+**Pull the checkpoints — run these ON the Trossen box** (`git pull` first; you need commit
+`024fff4` for the base config and `9291151` for the prompt metadata):
 
 ```bash
-# Terminal 1 — model server (JAX venv)
+# TA-VLA SOTA (+obs+obj) — 9.0 GB
+rsync -rltvP --mkpath --no-owner --no-group --no-perms \
+  -e "ssh -p 28544 -i ~/.ssh/id_ed25519" \
+  root@38.128.233.145:/workspace/EVAN-TA-VLA/checkpoints/pi0_trossen_charger_plugin_effort_sota/run_001/29999/ \
+  ~/EVAN-TA-VLA/checkpoints/pi0_trossen_charger_plugin_effort_sota/run_001/29999/
+
+# Base pi0 ablation (no torque) — 8.9 GB
+rsync -rltvP --mkpath --no-owner --no-group --no-perms \
+  -e "ssh -p 28544 -i ~/.ssh/id_ed25519" \
+  root@38.128.233.145:/workspace/EVAN-TA-VLA/checkpoints/pi0_trossen_charger_plugin_base/run_001/29999/ \
+  ~/EVAN-TA-VLA/checkpoints/pi0_trossen_charger_plugin_base/run_001/29999/
+```
+
+Verify each with `du -sh` on the target: 9.0 GB / 8.9 GB, `params` 5.8 GB in both.
+
+**Serve** — two processes from `~/EVAN-TA-VLA`. Only the two `--policy.*` flags differ between
+the policies; the client command is **identical** for both:
+
+```bash
+# Terminal 1 — model server (JAX venv). Pick ONE:
+
+# (a) TA-VLA SOTA
 .venv/bin/python scripts/serve_policy.py --port 8000 \
   policy:checkpoint --policy.config pi0_trossen_charger_plugin_effort_sota \
   --policy.dir checkpoints/pi0_trossen_charger_plugin_effort_sota/run_001/29999
 
-# Terminal 2 — robot client (lerobot venv); drop --dry-run only after the dry run looks right
+# (b) base pi0 ablation
+.venv/bin/python scripts/serve_policy.py --port 8000 \
+  policy:checkpoint --policy.config pi0_trossen_charger_plugin_base \
+  --policy.dir checkpoints/pi0_trossen_charger_plugin_base/run_001/29999
+```
+
+```bash
+# Terminal 2 — robot client (lerobot venv), same for both policies.
+# Drop --dry-run only after the dry run looks right.
 ~/lerobot_trossen/.venv/bin/python -m examples.trossen_real.main \
   --host localhost --port 8000 --action-horizon 25 \
   --max-episode-steps 150 --dry-run
@@ -650,6 +700,14 @@ Charger plug-in, two processes from `~/EVAN-TA-VLA`:
 The client will log
 `Using prompt: 'Unplug the charging cube from the power strip, plug it into the adjacent outlet, then turn the power strip switch on'`
 — check that before letting it move.
+
+> The client sends `effort` to **both** policies. The base policy ignores it: verified by pinning
+> the sampling RNG and confirming with-effort and without-effort inference are bit-identical
+> (max diff 0.0). Note `Policy.infer` splits its RNG per call, so two calls on identical inputs
+> legitimately differ — pin `policy._rng` before comparing anything.
+
+For a fair A/B, restart Terminal 1 with the other config and rerun the **same** client command with
+the same cube/charger placement, seed pose, `--action-horizon` and `--max-episode-steps`.
 
 Then follow the §9 safety ladder (dry run → guarded live with `--max-relative-target 1.0` and
 `--action-ema-alpha 0.5`), and honour the near-constant-joint staging check in §11e — for this
