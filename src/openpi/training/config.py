@@ -354,6 +354,11 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
     # If empty, will not load effort data.
     effort_history: Sequence[int] = ()
 
+    # If true, zero out and mask the base (cam_high) view so the policy sees only the two wrist
+    # cameras. The dataset is left untouched — cam_high is still repacked and decoded — so a run
+    # with this flag differs from one without it in exactly this one respect.
+    mask_base_image: bool = False
+
     # Repack transforms.
     repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(default=_transforms.Group())
     # Action keys that will be used to read the action sequence from the dataset.
@@ -392,6 +397,7 @@ class LeRobotTavlaDataConfig(DataConfigFactory):
             inputs=[
                 tavla_policy.TavlaInputs(
                     action_dim=model_config.action_dim,
+                    mask_base_image=self.mask_base_image,
                 )
             ],
             outputs=[tavla_policy.TavlaOutputs()],
@@ -1005,6 +1011,72 @@ _CONFIGS = [
         ),
         data=LeRobotTavlaDataConfig(
             repo_id="trossen_bimanual_charger_plugin_tavla",
+            default_prompt=(
+                "Unplug the charging cube from the power strip, plug it into the adjacent outlet, "
+                "then turn the power strip switch on"
+            ),
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    #
+    # Charger plug-in, partial-observability ablation: the same two policies with the base
+    # (cam_high) view removed, leaving only the two wrist cameras. Together with the two configs
+    # above this forms a 2x2 — {TA-VLA SOTA, base pi0} x {with cam_high, wrist-only} — on one
+    # dataset, so the torque lift can be read off both under full observation and under the
+    # harder partial one (the wrists lose sight of the outlet during approach).
+    #
+    # mask_base_image zeroes and masks the base view inside TavlaInputs rather than dropping the
+    # column from the dataset: the loader still reads and decodes cam_high, so these runs differ
+    # from their full-observation counterparts in exactly one respect. That transform is also the
+    # one create_trained_policy builds its input stack from, so the masking is applied at serve
+    # time too and the deploy client needs no changes.
+    #
+    # Norm stats hold only state/actions/effort and are camera-independent, so
+    # assets/<name>/ was copied verbatim from the corresponding full-observation config.
+    TrainConfig(
+        name="pi0_trossen_charger_plugin_effort_sota_wristonly",
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            effort_type=EffortType.EXPERT_HIS_C_FUT,
+            effort_dim=14,
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="trossen_bimanual_charger_plugin_tavla",
+            effort_history=tuple(4 * i - 36 for i in range(10)),  # 10 frames over ~1.2 s @ 30 fps
+            mask_base_image=True,
+            default_prompt=(
+                "Unplug the charging cube from the power strip, plug it into the adjacent outlet, "
+                "then turn the power strip switch on"
+            ),
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_trossen_charger_plugin_base_wristonly",
+        model=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotTavlaDataConfig(
+            repo_id="trossen_bimanual_charger_plugin_tavla",
+            mask_base_image=True,
             default_prompt=(
                 "Unplug the charging cube from the power strip, plug it into the adjacent outlet, "
                 "then turn the power strip switch on"

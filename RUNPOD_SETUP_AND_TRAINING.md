@@ -737,3 +737,22 @@ the same cube/charger placement, seed pose, `--action-horizon` and `--max-episod
 Then follow the §9 safety ladder (dry run → guarded live with `--max-relative-target 1.0` and
 `--action-ema-alpha 0.5`), and honour the near-constant-joint staging check in §11e — for this
 dataset the **left gripper must start at ≈0**.
+
+---
+
+## 12. Partial-observability ablation (wrist-only)
+
+Both charger policies have wrist-only counterparts —
+`pi0_trossen_charger_plugin_effort_sota_wristonly` and `pi0_trossen_charger_plugin_base_wristonly`
+— which mask out the `cam_high` view to test whether torque matters more when vision is degraded.
+Full runbook: **`PARTIAL_OBSERVABILITY_ABLATION.md`**. Three things that surprise people:
+
+- **`cam_low` was never in the training data.** `DEFAULT_CAMERAS` in the conversion script drops
+  it, and the repack dict / `TavlaInputs` / the deploy client all handle exactly three cameras.
+  The only external view any of these policies ever saw is `cam_high`.
+- **The masking lives in `TavlaInputs`, not in the dataset**, via `mask_base_image=True` on the
+  data config. `create_trained_policy` builds its input stack from the same transform, so the
+  masking applies at serve time automatically and **the deploy client is unchanged** — but the
+  high camera must stay physically plugged in, since the client still opens three RealSenses.
+- **Norm stats were copied, not recomputed** (they contain only `state`/`actions`/`effort`, no
+  camera data). Don't run `compute_norm_stats.py` for these two configs.

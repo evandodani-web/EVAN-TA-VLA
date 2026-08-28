@@ -30,6 +30,12 @@ class TavlaInputs(transforms.DataTransformFn):
     # The action dimension of the model. Will be used to pad state and actions.
     action_dim: int
 
+    # If true, the base (cam_high) view is replaced by a zero image and masked out of attention,
+    # leaving only the two wrist views. Used for the partial-observability ablation. Applies
+    # identically at train time and at serve time, since both build the model input from this
+    # transform, so a policy trained with it can never be served without it.
+    mask_base_image: bool = False
+
     def __call__(self, data: dict) -> dict:
         # Get the state. We are padding from 14 to the model action dim.
         state = transforms.pad_to_dim(data["state"], self.action_dim)
@@ -39,11 +45,13 @@ class TavlaInputs(transforms.DataTransformFn):
         # Assume that base image always exists.
         base_image = _parse_image(in_images["cam_high"])
 
+        # pi0 always expects all three image slots, so a dropped view is padded with zeros and
+        # masked (the same convention aloha_policy/droid_policy use for absent cameras).
         images = {
-            "base_0_rgb": base_image,
+            "base_0_rgb": np.zeros_like(base_image) if self.mask_base_image else base_image,
         }
         image_masks = {
-            "base_0_rgb": np.True_,
+            "base_0_rgb": np.False_ if self.mask_base_image else np.True_,
         }
 
         # Add the extra images.
