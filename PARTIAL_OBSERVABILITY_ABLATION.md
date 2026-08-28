@@ -210,8 +210,20 @@ tmux new -d -s ablation 'bash scripts/run_wristonly_ablation.sh'
 tail -f /workspace/train_logs/ablation_chain.log
 ```
 
-It enables W&B only if `WANDB_API_KEY` is already exported (otherwise `--no-wandb-enabled`, so it
-never blocks on a prompt), waits for the GPU to be free before each run, and aborts the chain if
+W&B is enabled if `WANDB_API_KEY` is exported **or** present in `/workspace/.wandb_env`, and
+disabled otherwise (never an interactive prompt, which the new-format `wandb_v1_` keys fail
+anyway — see §7). That check runs at the start of each training run rather than at script
+startup, so the key can be dropped in at any point before training begins:
+
+```bash
+printf 'export WANDB_API_KEY=%s\n' '<your wandb_v1_ key>' > /workspace/.wandb_env
+chmod 600 /workspace/.wandb_env
+```
+
+Keep that file outside the repo — `/workspace` is the pod's persistent volume, so it survives
+restarts without ever being committed.
+
+The runner also waits for the GPU to be free before each run, and aborts the chain if
 the first run dies within 30 minutes — an early death is structural and the second run would fail
 the same way, whereas a late one is transient and the base run is still worth having. Logs land in
 `/workspace/train_logs/`, on the network volume, so they survive a pod restart.

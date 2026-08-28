@@ -37,14 +37,22 @@ MAIN_LOG=$LOG_DIR/ablation_chain.log
 
 log() { echo "[$(date -u '+%Y-%m-%d %H:%M:%SZ')] $*" | tee -a "$MAIN_LOG"; }
 
-# W&B if a key is present, otherwise stay offline rather than blocking on a prompt.
-if [ -n "${WANDB_API_KEY:-}" ]; then
-  WANDB_FLAG=--wandb-enabled
-  log "W&B key present -> logging enabled."
-else
-  WANDB_FLAG=--no-wandb-enabled
-  log "No W&B key in the environment -> running with --no-wandb-enabled."
-fi
+# Optional secrets file, kept outside the repo so the key is never committed.
+# Resolved at the start of each run rather than here, so it can be dropped in at any
+# point before training actually begins without restarting the chain.
+WANDB_ENV_FILE=/workspace/.wandb_env
+
+resolve_wandb() {
+  # shellcheck disable=SC1090
+  [ -f "$WANDB_ENV_FILE" ] && . "$WANDB_ENV_FILE"
+  if [ -n "${WANDB_API_KEY:-}" ]; then
+    WANDB_FLAG=--wandb-enabled
+    log "W&B key found -> logging enabled."
+  else
+    WANDB_FLAG=--no-wandb-enabled
+    log "No W&B key (looked in the environment and $WANDB_ENV_FILE) -> --no-wandb-enabled."
+  fi
+}
 
 # ---------------------------------------------------------------- 1. wait for data
 
@@ -115,6 +123,7 @@ wait_for_free_gpu() {
 run_training() {
   local config=$1 logfile=$2 start_ts end_ts rc
 
+  resolve_wandb
   wait_for_free_gpu
   log "=== START $config -> $logfile"
   start_ts=$(date +%s)
