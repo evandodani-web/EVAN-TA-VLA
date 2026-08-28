@@ -197,6 +197,25 @@ tmux new -d -s train_base_wo "cd /workspace/EVAN-TA-VLA && \
 Run these **sequentially, not concurrently**, on a single GPU: JAX preallocates ~61 GB of 80 GB,
 so two jobs will not co-exist. ~25 h each, so ~50 h total.
 
+### Or use the chained runner
+
+`scripts/run_wristonly_ablation.sh` does all of the above unattended — waits for the dataset to
+arrive and stop changing, sanity-checks it against the expected 56 episodes / 40,940 frames,
+copies it to local disk, trains the SOTA config, buffers 10 minutes for VRAM release and the
+final checkpoint flush, then trains the base config:
+
+```bash
+cd /workspace/EVAN-TA-VLA
+tmux new -d -s ablation 'bash scripts/run_wristonly_ablation.sh'
+tail -f /workspace/train_logs/ablation_chain.log
+```
+
+It enables W&B only if `WANDB_API_KEY` is already exported (otherwise `--no-wandb-enabled`, so it
+never blocks on a prompt), waits for the GPU to be free before each run, and aborts the chain if
+the first run dies within 30 minutes — an early death is structural and the second run would fail
+the same way, whereas a late one is transient and the base run is still worth having. Logs land in
+`/workspace/train_logs/`, on the network volume, so they survive a pod restart.
+
 Checkpoints land in `checkpoints/<config_name>/run_001/`, saved every 1,000 steps, kept at
 multiples of 5,000, final at `29999`. Keep them on `/workspace` — local disk does not survive a
 pod restart.
